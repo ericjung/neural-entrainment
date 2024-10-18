@@ -1,5 +1,6 @@
 /**
- * Play an isochronic tone at 40 Hz for stimulation
+ * Play an isochronic tone at 40 Hz for stimulation. 40 Hz is 12.5 msecs on, then 12.5 of silence, repeated indefinitely.
+ * Elapsed time is displayed every 30 seconds.
  * 
  * Example execution:
  * 
