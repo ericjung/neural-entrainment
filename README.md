@@ -1,13 +1,11 @@
 # neural-entrainment
 
-A collection of [neural brainwave entrainment](https://en.wikipedia.org/wiki/Brainwave_entrainment) code. I'll be adding to this more over time.
-
-After installing node, clone this directory locally then:
+A collection of [neural brainwave entrainment](https://en.wikipedia.org/wiki/Brainwave_entrainment) code. I'll be adding to this more over time. After [installing node](https://nodejs.org/en/learn/getting-started/how-to-install-nodejs), clone this directory locally then:
 
 
 ## isochronic tone
 
-Play an isochronic tone at 40 Hz for stimulation for x mi. 40 Hz is 12.5 msecs on, then 12.5 of silence, repeated indefinitely. Elapsed time is displayed every 30 seconds.
+Play an isochronic tone at 40 Hz for stimulation for `x` minutes. 40 Hz is 12.5 msecs of audible playback, then 12.5 of silence, repeated indefinitely. Elapsed time and remaining time is displayed every 30 seconds.
 
 ```
 npm install
