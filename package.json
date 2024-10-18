@@ -1,0 +1,14 @@
+{
+  "name": "neural-entrainment",
+  "version": "1.0.0",
+  "description": "40Hz isochronic tone",
+  "main": "isochronic-tone.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Eric H. Jung",
+  "license": "ISC",
+  "dependencies": {
+    "speaker": "^0.5.5"
+  }
+}
