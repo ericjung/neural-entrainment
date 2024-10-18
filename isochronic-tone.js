@@ -19,6 +19,9 @@ const duration = 0.0125;  // 12.5 milliseconds
 // Get frequency from command-line argument or default to 200 Hz
 const frequency = parseFloat(process.argv[2]) || 200;
 
+// Get duration (in minutes) from command-line argument or default to Infinity (no stop)
+const durationMinutes = parseFloat(process.argv[3]) || Infinity;
+
 // Number of samples for 12.5 ms
 const numSamples = Math.floor(sampleRate * duration);
 
@@ -54,23 +57,48 @@ function generateSilence() {
 // if we generate them repeatedly in the play loop.
 const toneBuffer = generateTone(), silenceBuffer = generateSilence();
 
-// Write to the speaker continuously
+// Write to the speaker continuously. Speaker can be closed at any time so check it's state first.
+let isPlaying = true;
 function playLoop() {
-    // Tone
-    speaker.write(toneBuffer, () => {
-        // After tone, write silence
-        speaker.write(silenceBuffer, playLoop); // Play silence, then repeat
-    });
+    if (!isPlaying) {
+        return;
+    }
+    if (!speaker.closed) {
+        speaker.write(toneBuffer, () => {
+            // After tone, write silence
+            if (!speaker.closed) {
+                speaker.write(silenceBuffer, playLoop); // Play silence, then repeat
+            }
+        });
+    }
 }
 
-playLoop();
-
-// Display elapsed time every minute so we know how long we've been listening
+// Display elapsed time every _interval_ seconds so we know how long we've been listening and how much remains
+const interval = 30000;
 let elapsedSeconds = 0;
-
-setInterval(() => {
-    elapsedSeconds += 30;
+const timerId = setInterval(() => {
+    elapsedSeconds += interval / 1000;
     const minutes = Math.floor(elapsedSeconds / 60);
-    const seconds = elapsedSeconds % 60;
-    console.log(`Elapsed time: ${minutes} minute(s) and ${seconds} second(s)`);
-}, 30000);
+    const seconds = Math.floor(elapsedSeconds % 60);
+    const remainingSeconds = (durationMinutes * 60) - elapsedSeconds;
+    const remainingMinutes = Math.floor(remainingSeconds / 60);
+    const remainingSecondsInMinute = Math.floor(remainingSeconds % 60);
+
+    console.log(`Elapsed time: ${minutes} minute(s) and ${seconds} second(s) | Remaining time: ${remainingMinutes} minute(s) and ${remainingSecondsInMinute} second(s) | Total duration: ${durationMinutes} minute(s)`);
+}, interval);
+
+// Optionally stop playback after x minutes
+if (durationMinutes !== Infinity) {
+    setTimeout(() => {
+        stopPlayback();
+    }, durationMinutes * 60 * 1000);
+}
+
+function stopPlayback() {
+    console.log(`Stopping playback after ${durationMinutes} minute(s).`);
+    isPlaying = false;
+    clearInterval(timerId);
+    speaker.end();
+}
+
+playLoop(); // start!
