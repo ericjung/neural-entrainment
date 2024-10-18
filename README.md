@@ -14,7 +14,7 @@ node isochronic-tone.js <frequency> <durationMinutes>
 
 `frequency`: optional, specifies the tone frequency. 200 Hz is the default. 400 Hz also seems to sound good; of course, this is subjective. Play with different values for one that you like.
 
-`durationMinutes`: Stop playing after `duration` minutes
+`durationMinutes`:  optional, specifies the `duration` in minutes after which play stops. Default is infinity.
 
 ### Example Execution
 

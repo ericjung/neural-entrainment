@@ -2,11 +2,11 @@
  * Play an isochronic tone at 40 Hz for stimulation. 40 Hz is 12.5 msecs on, then 12.5 of silence, repeated indefinitely.
  * Elapsed time is displayed every 30 seconds.
  * 
- * Example execution:
+ * node isochronic-tone.js <frequency in Hz> <duration in minutes>
  * 
- * node isochronic-tone.js 400
- * or to default to 200 Hz:
- * node node isochronic-tone.js
+ * example execution:
+ * node isochronic-tone.js    (200 Hz for Infinity)
+ * node isochronic-tone.js 400 20    (400 Hz for 20 minutes)
  */
 
 const Speaker = require('speaker');
