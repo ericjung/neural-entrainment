@@ -7,8 +7,10 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "Eric H. Jung",
-  "license": "ISC",
+  "license": "",
   "dependencies": {
-    "speaker": "^0.5.5"
+    "speaker": "^0.5.5",
+    "tonegenerator": "^0.3.3",
+    "waveheader": "^0.0.2"
   }
 }
