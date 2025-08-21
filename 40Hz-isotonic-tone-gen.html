@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>40 Hz Isochronic Tone Generator</title>
+</head>
+<body>
+  <h2>40 Hz Isochronic Tone Generator</h2>
+  <label for="freqInput">Base frequency (Hz): </label>
+  <input type="number" id="freqInput" value="200" min="20" max="2000" step="1">
+  <button id="startBtn">Start</button>
+  <button id="stopBtn">Stop</button>
+
+  <script>
+    let audioCtx;
+    let oscillator;
+    let gainNode;
+    let intervalId;
+
+    function startTone() {
+      if (audioCtx) return; // prevent multiple starts
+
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      oscillator = audioCtx.createOscillator();
+      gainNode = audioCtx.createGain();
+
+      const baseFreq = parseFloat(document.getElementById("freqInput").value) || 200;
+
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(baseFreq, audioCtx.currentTime);
+
+      oscillator.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+
+      oscillator.start();
+
+      // 40 Hz pulsing (isochronic) by toggling gain
+      let on = true;
+      intervalId = setInterval(() => {
+        gainNode.gain.setValueAtTime(on ? 1 : 0, audioCtx.currentTime);
+        on = !on;
+      }, 1000 / 80); // 40 Hz pulse = 80 toggles/sec
+    }
+
+    function stopTone() {
+      if (oscillator) {
+        oscillator.stop();
+        oscillator.disconnect();
+      }
+      if (gainNode) gainNode.disconnect();
+      if (audioCtx) audioCtx.close();
+      if (intervalId) clearInterval(intervalId);
+
+      audioCtx = null;
+      oscillator = null;
+      gainNode = null;
+      intervalId = null;
+    }
+
+    document.getElementById("startBtn").addEventListener("click", startTone);
+    document.getElementById("stopBtn").addEventListener("click", stopTone);
+  </script>
+</body>
+</html>
