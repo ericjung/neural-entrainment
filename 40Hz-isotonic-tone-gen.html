@@ -1,64 +1,131 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>40 Hz Isochronic Tone Generator</title>
+  <meta charset="utf-8" />
+  <title>40 Hz @ 48 kHz</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; }
+    label { display: inline-block; width: 10rem; }
+    input[type="number"] { width: 8rem; }
+    button { margin-right: .5rem; }
+    .row { margin: .5rem 0; }
+  </style>
 </head>
 <body>
-  <h2>40 Hz Isochronic Tone Generator</h2>
-  <label for="freqInput">Base frequency (Hz): </label>
-  <input type="number" id="freqInput" value="200" min="20" max="2000" step="1">
-  <button id="startBtn">Start</button>
-  <button id="stopBtn">Stop</button>
+  <h1>Generate WAV</h1>
+
+  <div class="row"><label for="freq">Frequency (Hz)</label>
+    <input id="freq" type="number" value="40" min="1" max="20000" step="1">
+  </div>
+  <div class="row"><label for="secs">Duration (sec)</label>
+    <input id="secs" type="number" value="10" min="1" max="600" step="1">
+  </div>
+  <div class="row"><label for="sr">Sample rate</label>
+    <input id="sr" type="number" value="48000" min="8000" max="192000" step="1">
+  </div>
+  <div class="row"><label for="amp">Amplitude (0–1)</label>
+    <input id="amp" type="number" value="0.4" min="0" max="1" step="0.01">
+  </div>
+  <div class="row">
+    <button id="build">Build WAV</button>
+    <button id="play">Play</button>
+    <button id="stop">Stop</button>
+    <label><input id="loop" type="checkbox" checked> Loop</label>
+  </div>
+
+  <audio id="player" controls style="width:100%; display:block; margin-top:1rem;"></audio>
+  <div class="row"><a id="download" download="tone.wav" href="#">Download last build</a></div>
 
   <script>
-    let audioCtx;
-    let oscillator;
-    let gainNode;
-    let intervalId;
-
-    function startTone() {
-      if (audioCtx) return; // prevent multiple starts
-
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      oscillator = audioCtx.createOscillator();
-      gainNode = audioCtx.createGain();
-
-      const baseFreq = parseFloat(document.getElementById("freqInput").value) || 200;
-
-      oscillator.type = "sine";
-      oscillator.frequency.setValueAtTime(baseFreq, audioCtx.currentTime);
-
-      oscillator.connect(gainNode);
-      gainNode.connect(audioCtx.destination);
-
-      oscillator.start();
-
-      // 40 Hz pulsing (isochronic) by toggling gain
-      let on = true;
-      intervalId = setInterval(() => {
-        gainNode.gain.setValueAtTime(on ? 1 : 0, audioCtx.currentTime);
-        on = !on;
-      }, 1000 / 80); // 40 Hz pulse = 80 toggles/sec
-    }
-
-    function stopTone() {
-      if (oscillator) {
-        oscillator.stop();
-        oscillator.disconnect();
+    // (Int16, no fades, Math.round)
+    function generatePCM_NodeExact({ freq = 40, durationSec = 10, sampleRate = 48000, amplitude = 0.4 }) {
+      const numSamples = Math.floor(sampleRate * durationSec);
+      const pcm = new Int16Array(numSamples);
+      for (let i = 0; i < numSamples; i++) {
+        const t = i / sampleRate;
+        // Int16, rounded, 0.4 amplitude
+        pcm[i] = Math.round(Math.sin(2 * Math.PI * freq * t) * 32767 * amplitude);
       }
-      if (gainNode) gainNode.disconnect();
-      if (audioCtx) audioCtx.close();
-      if (intervalId) clearInterval(intervalId);
-
-      audioCtx = null;
-      oscillator = null;
-      gainNode = null;
-      intervalId = null;
+      return pcm;
     }
 
-    document.getElementById("startBtn").addEventListener("click", startTone);
-    document.getElementById("stopBtn").addEventListener("click", stopTone);
+    // --- WAV header builder
+    function pcmToWavBlob_NodeExact(pcm, sampleRate = 48000, numChannels = 1) {
+      const bytesPerSample = 2;
+      const blockAlign = numChannels * bytesPerSample;
+      const byteRate = sampleRate * blockAlign;
+      const dataSize = pcm.length * bytesPerSample;
+
+      const buffer = new ArrayBuffer(44 + dataSize);
+      const view = new DataView(buffer);
+
+      // RIFF
+      writeAscii(view, 0, "RIFF");
+      view.setUint32(4, 36 + dataSize, true);
+      writeAscii(view, 8, "WAVE");
+
+      // fmt
+      writeAscii(view, 12, "fmt ");
+      view.setUint32(16, 16, true);     // PCM chunk size
+      view.setUint16(20, 1, true);      // PCM format
+      view.setUint16(22, numChannels, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, byteRate, true);
+      view.setUint16(32, blockAlign, true);
+      view.setUint16(34, 16, true);     // bits per sample
+
+      // data
+      writeAscii(view, 36, "data");
+      view.setUint32(40, dataSize, true);
+
+      // samples (little-endian int16)
+      let o = 44;
+      for (let i = 0; i < pcm.length; i++, o += 2) view.setInt16(o, pcm[i], true);
+
+      return new Blob([buffer], { type: "audio/wav" });
+    }
+
+    function writeAscii(dv, offset, str) {
+      for (let i = 0; i < str.length; i++) dv.setUint8(offset + i, str.charCodeAt(i));
+    }
+
+    const $freq = document.getElementById('freq');
+    const $secs = document.getElementById('secs');
+    const $sr   = document.getElementById('sr');
+    const $amp  = document.getElementById('amp');
+    const $build= document.getElementById('build');
+    const $play = document.getElementById('play');
+    const $stop = document.getElementById('stop');
+    const $loop = document.getElementById('loop');
+    const $player = document.getElementById('player');
+    const $download = document.getElementById('download');
+
+    let currentURL = null;
+
+    function build() {
+      const freq = parseFloat($freq.value);
+      const durationSec = parseFloat($secs.value);
+      const sampleRate = parseInt($sr.value, 10);
+      const amplitude = parseFloat($amp.value);
+
+      const pcm = generatePCM_NodeExact({ freq, durationSec, sampleRate, amplitude });
+      const wavBlob = pcmToWavBlob_NodeExact(pcm, sampleRate, 1);
+
+      if (currentURL) URL.revokeObjectURL(currentURL);
+      currentURL = URL.createObjectURL(wavBlob);
+      $player.src = currentURL;
+      $player.loop = $loop.checked;
+      $download.href = currentURL;
+    }
+
+    $build.addEventListener('click', build);
+    $play.addEventListener('click', () => { if (!$player.src) build(); $player.loop = $loop.checked; $player.play(); });
+    $stop.addEventListener('click', () => { $player.pause(); $player.currentTime = 0; });
+    $loop.addEventListener('change', () => { $player.loop = $loop.checked; });
+
+    // Build once on load.
+    build();
   </script>
 </body>
 </html>
