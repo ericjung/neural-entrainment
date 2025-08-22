@@ -2,7 +2,7 @@
 
 2025-08-21: do not use this repo. it is still in tests. it currently outputs slightly more than 40Hz.
 
-[web version](40Hz-isotonic-tone-gen.html)
+[web version](https://ericjung.github.io/neural-entrainment/40Hz-isotonic-tone-gen.html)
 
 A collection of [neural brainwave entrainment](https://en.wikipedia.org/wiki/Brainwave_entrainment) code. I'll be adding to this more over time. After [installing node](https://nodejs.org/en/learn/getting-started/how-to-install-nodejs), clone this directory locally then:
 
