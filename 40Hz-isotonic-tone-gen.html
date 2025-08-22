@@ -11,6 +11,7 @@
   .tag { padding:.25rem .5rem; border:1px solid #444; border-radius:.4rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   label { display:inline-flex; align-items:center; gap:.5rem; }
   input[type="number"] { width: 7rem; padding:.35rem .5rem; border-radius:.35rem; border:1px solid #444; background:#111; color:#fff; }
+  input[type="checkbox"] { transform: scale(1.1); }
   button { padding:.5rem .9rem; border-radius:.5rem; border:1px solid #444; background:#111; color:#fff; }
   button:hover:not(:disabled) { background:#1a1a1a; }
   button:disabled { opacity:.6; cursor:not-allowed; }
@@ -24,14 +25,20 @@
   <span class="tag">Frequency: <strong>40 Hz</strong></span>
   <span class="tag">Duration (buffer): <strong>1.000 s</strong></span>
 </div>
+
 <div class="row">
   <label>Amplitude (40 Hz)
     <input id="amp40" type="number" value="1.5" min="0" max="10" step="0.05" />
   </label>
-  <label>Amplitude (200 Hz)
-    <input id="amp200" type="number" value="0.0" min="0" max="10" step="0.05" />
+</div>
+
+<div class="row">
+  <label><input id="useCarrier" type="checkbox"> Enable 200 Hz AM carrier (modulated at 40 Hz)</label>
+  <label>Amplitude (200 Hz carrier)
+    <input id="amp200" type="number" value="0.6" min="0" max="10" step="0.05" />
   </label>
 </div>
+
 <div class="row">
   <button id="play">Play (loop)</button>
   <button id="stop">Stop</button>
@@ -47,14 +54,15 @@
 
 const FIXED_SAMPLE_RATE = 48000;  // 48 kHz (requested)
 const FIXED_DURATION_S  = 1.0;    // 1.000 s (exact)
-const FREQ_MAIN_HZ      = 40;     // 40 Hz (main)
-const FREQ_AUX_HZ       = 200;    // 200 Hz (aux, user amplitude)
+const FREQ_MAIN_HZ      = 40;     // 40 Hz (entrainment target)
+const FREQ_CARRIER_HZ   = 200;    // 200 Hz optional AM carrier
 
 let ctx = null, buffer = null, src = null;
 const $play = document.getElementById('play');
 const $stop = document.getElementById('stop');
 const $amp40 = document.getElementById('amp40');
 const $amp200 = document.getElementById('amp200');
+const $useCarrier = document.getElementById('useCarrier');
 
 /** Ensure an AudioContext exists, requesting 48 kHz (browser may override) */
 async function ensureCtx() {
@@ -66,18 +74,30 @@ async function ensureCtx() {
   return ctx;
 }
 
-/** Generate a Float32 buffer: 40 Hz + 200 Hz (amplitudes user-controlled) */
-function generateFloat32(sampleRate, durationSec, amp40, amp200) {
-  const numSamples = Math.floor(durationSec * sampleRate); // [0, 1s) — excludes t=1s sample
+/** Generate Float32 buffer:
+ *  - Pure 40 Hz sine (always)
+ *  - Optional 200 Hz carrier, amplitude-modulated by 40 Hz: (0.5 + 0.5*sin(40Hz*t))
+ */
+function generateFloat32(sampleRate, durationSec, amp40, useCarrier, amp200) {
+  const numSamples = Math.floor(durationSec * sampleRate); // [0, 1s)
   const out = new Float32Array(numSamples);
 
-  const w1 = 2 * Math.PI * FREQ_MAIN_HZ;
-  const w2 = 2 * Math.PI * FREQ_AUX_HZ;
+  const w40 = 2 * Math.PI * FREQ_MAIN_HZ;
+  const w200 = 2 * Math.PI * FREQ_CARRIER_HZ;
 
   for (let i = 0; i < numSamples; i++) {
     const t = i / sampleRate;
-    // Sum components; clamp to [-1, 1] to avoid clipping artifacts
-    let v = Math.sin(w1 * t) * amp40 + Math.sin(w2 * t) * amp200;
+
+    // Base 40 Hz component (entrainment)
+    let v = Math.sin(w40 * t) * amp40;
+
+    // Optional 200 Hz AM carrier, envelope at 40 Hz (kept ≥0 with 0.5+0.5*sin)
+    if (useCarrier) {
+      const env = 0.5 + 0.5 * Math.sin(w40 * t);
+      v += Math.sin(w200 * t) * (amp200 * env);
+    }
+
+    // Clamp to [-1, 1] to avoid clipping
     if (v > 1) v = 1; else if (v < -1) v = -1;
     out[i] = v;
   }
@@ -90,8 +110,9 @@ async function buildBuffer() {
   const rate = ctx.sampleRate; // actual rate (may differ from 48k on some devices)
   const amp40 = parseFloat($amp40.value);
   const amp200 = parseFloat($amp200.value);
+  const useCarrier = $useCarrier.checked;
 
-  const samples = generateFloat32(rate, FIXED_DURATION_S, amp40, amp200);
+  const samples = generateFloat32(rate, FIXED_DURATION_S, amp40, useCarrier, amp200);
   buffer = ctx.createBuffer(1, samples.length, rate);
   buffer.getChannelData(0).set(samples);
 }
@@ -99,7 +120,7 @@ async function buildBuffer() {
 /** Start gapless looping; prevent multiple plays until stopped */
 async function playLoop() {
   if (src) return;              // already playing
-  await buildBuffer();          // always rebuild from current amplitudes
+  await buildBuffer();          // rebuild from current amplitudes/settings
 
   src = ctx.createBufferSource();
   src.buffer = buffer;
