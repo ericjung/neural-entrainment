@@ -21,6 +21,7 @@
 </style>
 
 <h1>Neural Entrainment - 40 Hz @ 48 kHz loop</h1>
+<h3>Pure 40 Hz sine loop at 48 kHz, sample-accurate, no carrier, no compressor</h3>
 
 <div class="row">
   <span class="tag">Sample rate: <strong>48,000 Hz</strong></span>
@@ -30,7 +31,7 @@
 
 <div class="row">
   <!-- Output gain for the 40 Hz tone. Clamped ≤ 1.0 to prevent clipping. -->
-  <label>Amplitude (40 Hz, output gain)
+  <label>Amplitude (40 Hz, output gain). Above 1.0 causes clipping.
     <input id="amp40" type="number" value="0.8" min="0" max="1.0" step="0.01" />
   </label>
 </div>
