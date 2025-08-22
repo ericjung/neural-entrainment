@@ -1,105 +1,130 @@
 <!doctype html>
 <html lang="en">
 <meta charset="utf-8" />
-<title>Gapless 40 Hz @ 48 kHz</title>
+<title>Neural Entrainment - 40 Hz @ 48 kHz loop</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
 <style>
-  body { font-family: system-ui, sans-serif; margin: 2rem; background-color: black; color: white}
-  label { margin-right: 1rem; display:inline-block; }
-  input { width: 6rem; }
-  button { margin-right: .5rem; }
-  button:disabled { opacity: .6; cursor: not-allowed; }
+  :root { color-scheme: dark; }
+  body { background:#000; color:#fff; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
+  h1 { margin-top: 0; }
+  .row { margin:.5rem 0; display:flex; gap:1rem; align-items: center; flex-wrap: wrap; }
+  .tag { padding:.25rem .5rem; border:1px solid #444; border-radius:.4rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  label { display:inline-flex; align-items:center; gap:.5rem; }
+  input[type="number"] { width: 7rem; padding:.35rem .5rem; border-radius:.35rem; border:1px solid #444; background:#111; color:#fff; }
+  button { padding:.5rem .9rem; border-radius:.5rem; border:1px solid #444; background:#111; color:#fff; }
+  button:hover:not(:disabled) { background:#1a1a1a; }
+  button:disabled { opacity:.6; cursor:not-allowed; }
+  small { color:#aaa; }
 </style>
 
-<h1>Neural Entrainment - gapless loop 40 Hz @ 48 kHz</h1>
-<div>
-  <label>Frequency <input id="freq" type="number" value="40" min="1" max="20000" step="1"></label>
-  <label>Duration (s) <input id="dur" type="number" value="10" min="1" max="600" step="1"></label>
-  <label>Sample rate <input id="sr" type="number" value="48000" min="8000" max="192000" step="1"></label>
-  <label>Amplitude <input id="amp" type="number" value="0.4" min="0" max="1" step="0.01"></label>
+<h1>Neural Entrainment - 40 Hz @ 48 kHz loop</h1>
+
+<div class="row">
+  <span class="tag">Sample rate: <strong>48,000 Hz</strong></span>
+  <span class="tag">Frequency: <strong>40 Hz</strong></span>
+  <span class="tag">Duration (buffer): <strong>1.000 s</strong></span>
 </div>
-<div style="margin-top:.5rem">
+<div class="row">
+  <label>Amplitude (40 Hz)
+    <input id="amp40" type="number" value="1.5" min="0" max="10" step="0.05" />
+  </label>
+  <label>Amplitude (200 Hz)
+    <input id="amp200" type="number" value="0.0" min="0" max="10" step="0.05" />
+  </label>
+</div>
+<div class="row">
   <button id="play">Play (loop)</button>
   <button id="stop">Stop</button>
+  <small>Play is disabled while looping; press Stop to re-enable.</small>
 </div>
 
 <script>
+/*
+  Buffer length is hard-coded to 1.000 s.
+  IMPORTANT: To avoid clicks at the loop boundary, the buffer duration must be
+  an integer multiple of the cycle length (1/40 s = 0.025 s), e.g. 1 s, 2.5 s, 10 s, etc.
+*/
+
+const FIXED_SAMPLE_RATE = 48000;  // 48 kHz (requested)
+const FIXED_DURATION_S  = 1.0;    // 1.000 s (exact)
+const FREQ_MAIN_HZ      = 40;     // 40 Hz (main)
+const FREQ_AUX_HZ       = 200;    // 200 Hz (aux, user amplitude)
+
 let ctx = null, buffer = null, src = null;
 const $play = document.getElementById('play');
 const $stop = document.getElementById('stop');
+const $amp40 = document.getElementById('amp40');
+const $amp200 = document.getElementById('amp200');
 
-/** Ensure we have an AudioContext at the desired sampleRate */
-async function ensureCtx(sampleRate) {
-  if (!ctx || ctx.sampleRate !== sampleRate) {
-    if (ctx) { try { await ctx.close(); } catch(_){} }
+/** Ensure an AudioContext exists, requesting 48 kHz (browser may override) */
+async function ensureCtx() {
+  if (!ctx) {
     const AC = window.AudioContext || window.webkitAudioContext;
-    ctx = new AC({ sampleRate });
+    ctx = new AC({ sampleRate: FIXED_SAMPLE_RATE });
   }
   if (ctx.state === 'suspended') await ctx.resume();
   return ctx;
 }
 
-/** Float32 generation */
-function generateFloat32({ freq, durationSec, sampleRate, amplitude }) {
-  const numSamples = Math.floor(durationSec * sampleRate);
-  const data = new Float32Array(numSamples);
-  const twoPiF = 2 * Math.PI * freq;
+/** Generate a Float32 buffer: 40 Hz + 200 Hz (amplitudes user-controlled) */
+function generateFloat32(sampleRate, durationSec, amp40, amp200) {
+  const numSamples = Math.floor(durationSec * sampleRate); // [0, 1s) — excludes t=1s sample
+  const out = new Float32Array(numSamples);
+
+  const w1 = 2 * Math.PI * FREQ_MAIN_HZ;
+  const w2 = 2 * Math.PI * FREQ_AUX_HZ;
+
   for (let i = 0; i < numSamples; i++) {
     const t = i / sampleRate;
-    data[i] = Math.max(-1, Math.min(1, Math.sin(twoPiF * t) * amplitude));
+    // Sum components; clamp to [-1, 1] to avoid clipping artifacts
+    let v = Math.sin(w1 * t) * amp40 + Math.sin(w2 * t) * amp200;
+    if (v > 1) v = 1; else if (v < -1) v = -1;
+    out[i] = v;
   }
-  return data;
+  return out;
 }
 
 /** Build (or rebuild) the AudioBuffer from current UI values */
-async function buildBufferFromUI() {
-  const freq = parseFloat(document.getElementById('freq').value);
-  const durationSec = parseFloat(document.getElementById('dur').value);
-  const requestedRate = parseInt(document.getElementById('sr').value, 10);
-  const amplitude = parseFloat(document.getElementById('amp').value);
+async function buildBuffer() {
+  await ensureCtx();
+  const rate = ctx.sampleRate; // actual rate (may differ from 48k on some devices)
+  const amp40 = parseFloat($amp40.value);
+  const amp200 = parseFloat($amp200.value);
 
-  await ensureCtx(requestedRate);
-  const actualRate = ctx.sampleRate; // may differ if browser ignores hint
-  const samples = generateFloat32({ freq, durationSec, sampleRate: actualRate, amplitude });
-
-  buffer = ctx.createBuffer(1, samples.length, actualRate);
+  const samples = generateFloat32(rate, FIXED_DURATION_S, amp40, amp200);
+  buffer = ctx.createBuffer(1, samples.length, rate);
   buffer.getChannelData(0).set(samples);
 }
 
-/** Start looping */
+/** Start gapless looping; prevent multiple plays until stopped */
 async function playLoop() {
-  // prevent double play
-  if (src) return;
-
-  await buildBufferFromUI();
+  if (src) return;              // already playing
+  await buildBuffer();          // always rebuild from current amplitudes
 
   src = ctx.createBufferSource();
   src.buffer = buffer;
-  src.loop = true;
+  src.loop = true;              // sample-accurate looping
   src.loopStart = 0;
   src.loopEnd = buffer.duration;
   src.connect(ctx.destination);
   src.start();
 
-  // Disable Play while playing
   $play.disabled = true;
-
-  // If loop=false, when audio ends re-enable Play
   src.onended = () => { src = null; $play.disabled = false; };
 }
 
-/** Stop playback */
+/** Stop playback and re-enable Play */
 function stop() {
   if (src) {
     try { src.stop(); } catch(_) {}
     try { src.disconnect(); } catch(_) {}
     src = null;
   }
-  // Re-enable Play button after stopping
   $play.disabled = false;
 }
 
 $play.onclick = async () => {
-  await ensureCtx(parseInt(document.getElementById('sr').value, 10));
+  await ensureCtx();
   if (ctx.state === 'suspended') await ctx.resume();
   playLoop();
 };
