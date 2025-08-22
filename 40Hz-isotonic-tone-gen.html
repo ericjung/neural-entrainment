@@ -3,94 +3,106 @@
 <meta charset="utf-8" />
 <title>Gapless 40 Hz @ 48 kHz</title>
 <style>
-  body { font-family: system-ui, sans-serif; margin: 2rem; }
-  button { margin-right:.5rem; }
+  body { font-family: system-ui, sans-serif; margin: 2rem; background-color: black; color: white}
+  label { margin-right: 1rem; display:inline-block; }
+  input { width: 6rem; }
+  button { margin-right: .5rem; }
+  button:disabled { opacity: .6; cursor: not-allowed; }
 </style>
-<h1>Gapless 40 Hz @ 48 kHz</h1>
+
+<h1>Neural Entrainment - gapless loop 40 Hz @ 48 kHz</h1>
 <div>
-  <label>Frequency <input id="freq" type="number" value="40"></label>
-  <label>Duration (s) <input id="dur" type="number" value="10"></label>
-  <label>Sample rate <input id="sr" type="number" value="48000"></label>
-  <label>Amplitude <input id="amp" type="number" value="0.4" step="0.01"></label>
+  <label>Frequency <input id="freq" type="number" value="40" min="1" max="20000" step="1"></label>
+  <label>Duration (s) <input id="dur" type="number" value="10" min="1" max="600" step="1"></label>
+  <label>Sample rate <input id="sr" type="number" value="48000" min="8000" max="192000" step="1"></label>
+  <label>Amplitude <input id="amp" type="number" value="0.4" min="0" max="1" step="0.01"></label>
 </div>
 <div style="margin-top:.5rem">
-  <button id="build">Build buffer</button>
   <button id="play">Play (loop)</button>
   <button id="stop">Stop</button>
 </div>
 
 <script>
-let ctx, buffer, src;
+let ctx = null, buffer = null, src = null;
+const $play = document.getElementById('play');
+const $stop = document.getElementById('stop');
 
-function ensureCtx() {
-  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+/** Ensure we have an AudioContext at the desired sampleRate */
+async function ensureCtx(sampleRate) {
+  if (!ctx || ctx.sampleRate !== sampleRate) {
+    if (ctx) { try { await ctx.close(); } catch(_){} }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    ctx = new AC({ sampleRate });
+  }
+  if (ctx.state === 'suspended') await ctx.resume();
+  return ctx;
 }
 
-function generateInt16PCM({ freq=40, durationSec=10, sampleRate=48000, amplitude=0.4 }) {
-  const numSamples = Math.floor(sampleRate * durationSec);
-  const pcm = new Int16Array(numSamples);
+/** Float32 generation */
+function generateFloat32({ freq, durationSec, sampleRate, amplitude }) {
+  const numSamples = Math.floor(durationSec * sampleRate);
+  const data = new Float32Array(numSamples);
+  const twoPiF = 2 * Math.PI * freq;
   for (let i = 0; i < numSamples; i++) {
     const t = i / sampleRate;
-    // Int16, Math.round, no fades
-    pcm[i] = Math.round(Math.sin(2 * Math.PI * freq * t) * 32767 * amplitude);
+    data[i] = Math.max(-1, Math.min(1, Math.sin(twoPiF * t) * amplitude));
   }
-  return { pcm, sampleRate };
+  return data;
 }
 
-function int16ToFloat32(int16) {
-  const f32 = new Float32Array(int16.length);
-  for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768;
-  return f32;
-}
-
-function buildBuffer() {
+/** Build (or rebuild) the AudioBuffer from current UI values */
+async function buildBufferFromUI() {
   const freq = parseFloat(document.getElementById('freq').value);
   const durationSec = parseFloat(document.getElementById('dur').value);
-  const sampleRate = parseInt(document.getElementById('sr').value, 10);
+  const requestedRate = parseInt(document.getElementById('sr').value, 10);
   const amplitude = parseFloat(document.getElementById('amp').value);
 
-  // Generate PCM, then convert to Float32 for Web Audio
-  const { pcm } = generateInt16PCM({ freq, durationSec, sampleRate, amplitude });
-  ensureCtx();
+  await ensureCtx(requestedRate);
+  const actualRate = ctx.sampleRate; // may differ if browser ignores hint
+  const samples = generateFloat32({ freq, durationSec, sampleRate: actualRate, amplitude });
 
-  // Create AudioBuffer at desired rate (ctx.sampleRate can differ; use resample if needed)
-  if (ctx.sampleRate !== sampleRate) {
-    // Simple resample by recreating context at target rate if possible
-    ctx.close();
-    ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
-  }
-
-  buffer = ctx.createBuffer(1, pcm.length, sampleRate);
-  buffer.getChannelData(0).set(int16ToFloat32(pcm));
+  buffer = ctx.createBuffer(1, samples.length, actualRate);
+  buffer.getChannelData(0).set(samples);
 }
 
-function playLoop() {
-  if (!buffer) buildBuffer();
-  ensureCtx();
+/** Start looping */
+async function playLoop() {
+  // prevent double play
+  if (src) return;
 
-  // AudioBufferSourceNode cannot be restarted; make a fresh one each time
+  await buildBufferFromUI();
+
   src = ctx.createBufferSource();
   src.buffer = buffer;
   src.loop = true;
   src.loopStart = 0;
-  src.loopEnd = buffer.duration; // exact 10s is gapless
+  src.loopEnd = buffer.duration;
   src.connect(ctx.destination);
   src.start();
+
+  // Disable Play while playing
+  $play.disabled = true;
+
+  // If loop=false, when audio ends re-enable Play
+  src.onended = () => { src = null; $play.disabled = false; };
 }
 
+/** Stop playback */
 function stop() {
-  if (src) { try { src.stop(); } catch(_){} src.disconnect(); src = null; }
+  if (src) {
+    try { src.stop(); } catch(_) {}
+    try { src.disconnect(); } catch(_) {}
+    src = null;
+  }
+  // Re-enable Play button after stopping
+  $play.disabled = false;
 }
 
-document.getElementById('build').onclick = buildBuffer;
-document.getElementById('play').onclick = async () => {
-  ensureCtx();
-  if (ctx.state === 'suspended') await ctx.resume(); // iOS/mobile gesture requirement
+$play.onclick = async () => {
+  await ensureCtx(parseInt(document.getElementById('sr').value, 10));
+  if (ctx.state === 'suspended') await ctx.resume();
   playLoop();
 };
-document.getElementById('stop').onclick = stop;
-
-// Build once so Play works immediately
-buildBuffer();
+$stop.onclick = stop;
 </script>
 </html>
