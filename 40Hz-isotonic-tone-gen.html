@@ -27,15 +27,16 @@
 </div>
 
 <div class="row">
-  <label>Amplitude (40 Hz)
+  <!-- UI is now pure OUTPUT GAIN. The generated 40 Hz sine is fixed at amp=1.0 (clean). -->
+  <label>Amplitude (40 Hz, output gain)
     <input id="amp40" type="number" value="1.5" min="0" max="10" step="0.05" />
   </label>
 </div>
 
 <div class="row">
   <label><input id="useCarrier" type="checkbox"> Enable 200 Hz AM carrier (modulated at 40 Hz)</label>
-  <label>Amplitude (200 Hz carrier)
-    <input id="amp200" type="number" value="0.6" min="0" max="10" step="0.05" />
+  <label>Carrier level (output gain)
+    <input id="carrierGain" type="number" value="0.6" min="0" max="10" step="0.05" />
   </label>
 </div>
 
@@ -50,19 +51,30 @@
   Buffer length is hard-coded to 1.000 s.
   IMPORTANT: To avoid clicks at the loop boundary, the buffer duration must be
   an integer multiple of the cycle length (1/40 s = 0.025 s), e.g. 1 s, 2.5 s, 10 s, etc.
+
+  DESIGN:
+  - 40 Hz tone is synthesized at amplitude = 1.0 (full-scale, clean, no clipping).
+  - "Amplitude (40 Hz)" is a POST-GAIN via GainNode, so it only changes loudness, not timbre.
+  - Optional 200 Hz carrier is AM-modulated by 40 Hz; its loudness is also via a GainNode.
 */
 
 const FIXED_SAMPLE_RATE = 48000;  // 48 kHz (requested)
-const FIXED_DURATION_S  = 1.0;    // 1.000 s (exact)
-const FREQ_MAIN_HZ      = 40;     // 40 Hz (entrainment target)
+const FIXED_DURATION_S  = 1.0;    // 1.000 s
+const FREQ_MAIN_HZ      = 40;     // 40 Hz entrainment target
 const FREQ_CARRIER_HZ   = 200;    // 200 Hz optional AM carrier
 
-let ctx = null, buffer = null, src = null;
+let ctx = null;
+
+// Nodes
+let src40 = null, gain40 = null;
+let srcCarrier = null, gainCarrier = null;
+
+// UI
 const $play = document.getElementById('play');
 const $stop = document.getElementById('stop');
 const $amp40 = document.getElementById('amp40');
-const $amp200 = document.getElementById('amp200');
 const $useCarrier = document.getElementById('useCarrier');
+const $carrierGain = document.getElementById('carrierGain');
 
 /** Ensure an AudioContext exists, requesting 48 kHz (browser may override) */
 async function ensureCtx() {
@@ -74,81 +86,114 @@ async function ensureCtx() {
   return ctx;
 }
 
-/** Generate Float32 buffer:
- *  - Pure 40 Hz sine (always)
- *  - Optional 200 Hz carrier, amplitude-modulated by 40 Hz: (0.5 + 0.5*sin(40Hz*t))
- */
-function generateFloat32(sampleRate, durationSec, amp40, useCarrier, amp200) {
-  const numSamples = Math.floor(durationSec * sampleRate); // [0, 1s)
-  const out = new Float32Array(numSamples);
-
-  const w40 = 2 * Math.PI * FREQ_MAIN_HZ;
-  const w200 = 2 * Math.PI * FREQ_CARRIER_HZ;
-
-  for (let i = 0; i < numSamples; i++) {
-    const t = i / sampleRate;
-
-    // Base 40 Hz component (entrainment)
-    let v = Math.sin(w40 * t) * amp40;
-
-    // Optional 200 Hz AM carrier, envelope at 40 Hz (kept ≥0 with 0.5+0.5*sin)
-    if (useCarrier) {
-      const env = 0.5 + 0.5 * Math.sin(w40 * t);
-      v += Math.sin(w200 * t) * (amp200 * env);
-    }
-
-    // Clamp to [-1, 1] to avoid clipping
-    if (v > 1) v = 1; else if (v < -1) v = -1;
-    out[i] = v;
+/** Generate a pure 40 Hz sine at amplitude EXACTLY 1.0 (no clipping/timbre change) */
+function makeBuffer40Hz() {
+  const rate = ctx.sampleRate;
+  const n = Math.floor(FIXED_DURATION_S * rate); // [0,1s)
+  const data = new Float32Array(n);
+  const w = 2 * Math.PI * FREQ_MAIN_HZ;
+  for (let i = 0; i < n; i++) {
+    const t = i / rate;
+    data[i] = Math.sin(w * t) * 1.0; // fixed amp = 1.0
   }
-  return out;
+  const buf = ctx.createBuffer(1, n, rate);
+  buf.getChannelData(0).set(data);
+  return buf;
 }
 
-/** Build (or rebuild) the AudioBuffer from current UI values */
-async function buildBuffer() {
-  await ensureCtx();
-  const rate = ctx.sampleRate; // actual rate (may differ from 48k on some devices)
-  const amp40 = parseFloat($amp40.value);
-  const amp200 = parseFloat($amp200.value);
-  const useCarrier = $useCarrier.checked;
-
-  const samples = generateFloat32(rate, FIXED_DURATION_S, amp40, useCarrier, amp200);
-  buffer = ctx.createBuffer(1, samples.length, rate);
-  buffer.getChannelData(0).set(samples);
+/** Generate a 200 Hz sine AM-modulated by 40 Hz (envelope 0..1), synthesized cleanly */
+function makeBufferCarrierAM() {
+  const rate = ctx.sampleRate;
+  const n = Math.floor(FIXED_DURATION_S * rate);
+  const data = new Float32Array(n);
+  const w200 = 2 * Math.PI * FREQ_CARRIER_HZ;
+  const w40  = 2 * Math.PI * FREQ_MAIN_HZ;
+  for (let i = 0; i < n; i++) {
+    const t = i / rate;
+    const env = 0.5 + 0.5 * Math.sin(w40 * t); // 0..1
+    data[i] = Math.sin(w200 * t) * env;        // carrier amp = 1.0 pre-gain, shaped by 40 Hz
+  }
+  const buf = ctx.createBuffer(1, n, rate);
+  buf.getChannelData(0).set(data);
+  return buf;
 }
 
-/** Start gapless looping; prevent multiple plays until stopped */
+/** Start gapless looping; prevent multiple Play clicks until stopped */
 async function playLoop() {
-  if (src) return;              // already playing
-  await buildBuffer();          // rebuild from current amplitudes/settings
+  if (src40 || srcCarrier) return; // already playing
 
-  src = ctx.createBufferSource();
-  src.buffer = buffer;
-  src.loop = true;              // sample-accurate looping
-  src.loopStart = 0;
-  src.loopEnd = buffer.duration;
-  src.connect(ctx.destination);
-  src.start();
+  await ensureCtx();
+
+  // Create/refresh 40 Hz buffer & nodes
+  const buf40 = makeBuffer40Hz();
+  src40 = ctx.createBufferSource();
+  src40.buffer = buf40;
+  src40.loop = true;
+  src40.loopStart = 0;
+  src40.loopEnd = buf40.duration;
+
+  if (!gain40) {
+    gain40 = ctx.createGain();
+    gain40.connect(ctx.destination);
+  }
+  updateGains(); // set gain values from UI
+  src40.connect(gain40);
+  src40.start();
+
+  // Optional 200 Hz AM carrier
+  if ($useCarrier.checked) {
+    const bufC = makeBufferCarrierAM();
+    srcCarrier = ctx.createBufferSource();
+    srcCarrier.buffer = bufC;
+    srcCarrier.loop = true;
+    srcCarrier.loopStart = 0;
+    srcCarrier.loopEnd = bufC.duration;
+
+    if (!gainCarrier) {
+      gainCarrier = ctx.createGain();
+      gainCarrier.connect(ctx.destination);
+    }
+    updateGains();
+    srcCarrier.connect(gainCarrier);
+    srcCarrier.start();
+
+    // When either ends (loop=false), re-enable Play
+    srcCarrier.onended = () => { srcCarrier = null; if (!src40) $play.disabled = false; };
+  }
+
+  // Re-enable Play only when all sources are stopped
+  src40.onended = () => { src40 = null; if (!srcCarrier) $play.disabled = false; };
 
   $play.disabled = true;
-  src.onended = () => { src = null; $play.disabled = false; };
 }
 
-/** Stop playback and re-enable Play */
-function stop() {
-  if (src) {
-    try { src.stop(); } catch(_) {}
-    try { src.disconnect(); } catch(_) {}
-    src = null;
-  }
+/** Stop everything and re-enable Play */
+function stopAll() {
+  if (src40)  { try { src40.stop(); }  catch(_){} try { src40.disconnect(); }  catch(_){} src40  = null; }
+  if (srcCarrier) { try { srcCarrier.stop(); } catch(_){} try { srcCarrier.disconnect(); } catch(_){} srcCarrier = null; }
   $play.disabled = false;
 }
+
+/** Update output gains from UI (pure loudness control) */
+function updateGains() {
+  if (gain40)      gain40.gain.value = clampNum(parseFloat($amp40.value), 0, 10);
+  if (gainCarrier) gainCarrier.gain.value = clampNum(parseFloat($carrierGain.value), 0, 10);
+}
+
+function clampNum(x, lo, hi){ return (isFinite(x) ? Math.min(hi, Math.max(lo, x)) : lo); }
 
 $play.onclick = async () => {
   await ensureCtx();
   if (ctx.state === 'suspended') await ctx.resume();
   playLoop();
 };
-$stop.onclick = stop;
+$stop.onclick = stopAll;
+
+// Live gain updates while playing
+$amp40.addEventListener('input', updateGains);
+$carrierGain.addEventListener('input', updateGains);
+
+// Rebuild loop if carrier on/off changes (waveform changes)
+$useCarrier.addEventListener('change', () => { if (src40 || srcCarrier) { stopAll(); $play.click(); } });
 </script>
 </html>
