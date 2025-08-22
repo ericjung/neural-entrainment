@@ -7,7 +7,7 @@
   :root { color-scheme: dark; }
   body { background:#000; color:#fff; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
   h1 { margin-top: 0; }
-  .row { margin:.75rem 0; display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
+  .row { margin:.5rem 0; display:flex; gap:1rem; align-items: center; flex-wrap: wrap; }
   .tag { padding:.25rem .5rem; border:1px solid #444; border-radius:.4rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   label { display:inline-flex; align-items:center; gap:.5rem; }
   input[type="number"] { width: 7rem; padding:.35rem .5rem; border-radius:.35rem; border:1px solid #444; background:#111; color:#fff; }
@@ -15,9 +15,6 @@
   button:hover:not(:disabled) { background:#1a1a1a; }
   button:disabled { opacity:.6; cursor:not-allowed; }
   small { color:#aaa; }
-  #meterWrap { width: 420px; }
-  #meter { width: 100%; height: 20px; display:block; background:#111; border:1px solid #444; border-radius:6px; }
-  #meterLabel { font-size:.9rem; color:#bbb; }
 </style>
 
 <h1>Neural Entrainment - 40 Hz @ 48 kHz loop</h1>
@@ -31,7 +28,7 @@
 
 <div class="row">
   <!-- Output gain for the 40 Hz tone. Clamped ≤ 1.0 to prevent clipping. -->
-  <label>Amplitude (40 Hz, output gain). Above 1.0 causes clipping.
+  <label>Amplitude (40 Hz, output gain)
     <input id="amp40" type="number" value="0.8" min="0" max="1.0" step="0.01" />
   </label>
 </div>
@@ -40,11 +37,6 @@
   <button id="play">Play (loop)</button>
   <button id="stop">Stop</button>
   <small>Tip: for more loudness, keep gain ≤ 1.0 here and raise your system volume.</small>
-</div>
-
-<div class="row" id="meterWrap">
-  <canvas id="meter" width="420" height="20"></canvas>
-  <span id="meterLabel">Output level</span>
 </div>
 
 <script>
@@ -56,7 +48,6 @@
   DESIGN:
   - 40 Hz tone is synthesized at amplitude = 1.0 (full-scale, clean).
   - "Amplitude (40 Hz)" is POST-GAIN via GainNode, clamped ≤ 1.0.
-  - A simple RMS level meter shows post-gain output in real time.
 */
 
 const FIXED_SAMPLE_RATE = 48000;  // 48 kHz (requested)
@@ -64,32 +55,19 @@ const FIXED_DURATION_S  = 1.0;    // 1.000 s
 const FREQ_MAIN_HZ      = 40;     // 40 Hz entrainment target
 
 let ctx = null;
-let src40 = null, gain40 = null, analyser = null;
+let src40 = null, gain40 = null;
 
+// UI
 const $play = document.getElementById('play');
 const $stop = document.getElementById('stop');
 const $amp40 = document.getElementById('amp40');
-
-const meterCanvas = document.getElementById('meter');
-const mctx = meterCanvas.getContext('2d');
-let meterRAF = null;
 
 /** Ensure an AudioContext exists, requesting 48 kHz (browser may override) */
 async function ensureCtx() {
   if (!ctx) {
     const AC = window.AudioContext || window.webkitAudioContext;
     ctx = new AC({ sampleRate: FIXED_SAMPLE_RATE });
-
-    // Post-gain node (volume control)
     gain40 = ctx.createGain();
-
-    // Analyser to visualize post-gain output
-    analyser = ctx.createAnalyser();
-    analyser.fftSize = 2048;          // fine for RMS
-    analyser.smoothingTimeConstant = 0.8;
-
-    // Split post-gain to analyser and destination
-    gain40.connect(analyser);
     gain40.connect(ctx.destination);
   }
   if (ctx.state === 'suspended') await ctx.resume();
@@ -102,4 +80,56 @@ function makeBuffer40Hz() {
   const n = Math.floor(FIXED_DURATION_S * rate);
   const data = new Float32Array(n);
   const w = 2 * Math.PI * FREQ_MAIN_HZ;
-  for (let i = 0; i < n;
+  for (let i = 0; i < n; i++) {
+    data[i] = Math.sin(w * (i / rate)) * 1.0;
+  }
+  const buf = ctx.createBuffer(1, n, rate);
+  buf.getChannelData(0).set(data);
+  return buf;
+}
+
+/** Start gapless looping; prevent multiple Play clicks until stopped */
+async function playLoop() {
+  if (src40) return; // already playing
+  await ensureCtx();
+
+  const buf40 = makeBuffer40Hz();
+  src40 = ctx.createBufferSource();
+  src40.buffer = buf40;
+  src40.loop = true;
+  src40.loopStart = 0;
+  src40.loopEnd = buf40.duration;
+  src40.connect(gain40);
+  updateGain();
+  src40.start();
+
+  src40.onended = () => { src40 = null; $play.disabled = false; };
+  $play.disabled = true;
+}
+
+/** Stop and re-enable Play */
+function stopAll() {
+  if (src40) { try { src40.stop(); } catch(_){} try { src40.disconnect(); } catch(_){} src40 = null; }
+  $play.disabled = false;
+}
+
+/** Update gain value (clamped 0..1) */
+function updateGain() {
+  if (gain40) {
+    let g = parseFloat($amp40.value);
+    if (!isFinite(g)) g = 0;
+    gain40.gain.value = Math.max(0, Math.min(1, g));
+  }
+}
+
+$play.onclick = async () => {
+  await ensureCtx();
+  if (ctx.state === 'suspended') await ctx.resume();
+  playLoop();
+};
+$stop.onclick = stopAll;
+
+// Live gain updates while playing
+$amp40.addEventListener('input', updateGain);
+</script>
+</html>
