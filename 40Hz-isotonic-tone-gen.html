@@ -1,135 +1,291 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
+<head>
 <meta charset="utf-8" />
-<title>Neural Entrainment - 40 Hz @ 48 kHz loop</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Background Tone — Offline & iOS-Friendly</title>
+<meta name="theme-color" content="#0b0f14" />
 <style>
-  :root { color-scheme: dark; }
-  body { background:#000; color:#fff; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
-  h1 { margin-top: 0; }
-  .row { margin:.5rem 0; display:flex; gap:1rem; align-items: center; flex-wrap: wrap; }
-  .tag { padding:.25rem .5rem; border:1px solid #444; border-radius:.4rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  label { display:inline-flex; align-items:center; gap:.5rem; }
-  input[type="number"] { width: 7rem; padding:.35rem .5rem; border-radius:.35rem; border:1px solid #444; background:#111; color:#fff; }
-  button { padding:.5rem .9rem; border-radius:.5rem; border:1px solid #444; background:#111; color:#fff; }
-  button:hover:not(:disabled) { background:#1a1a1a; }
-  button:disabled { opacity:.6; cursor:not-allowed; }
-  small { color:#aaa; }
+  :root { --bg:#0b0f14; --panel:#0f141b; --fg:#e6f1ff; --muted:#93a4bb; --border:#1e2a36; }
+  html,body { height:100%; }
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; background:var(--bg); color:var(--fg); display:grid; place-items:center; }
+  main { width:min(760px,94vw); padding:22px; background:var(--panel); border:1px solid var(--border); border-radius:14px; box-shadow:0 6px 30px rgba(0,0,0,.35); }
+  h1 { margin:0 0 12px; font-size:20px; }
+  .row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:10px 0; }
+  label { color:var(--muted); font-size:14px; }
+  button, input[type="range"] { background:#131a22; color:var(--fg); border:1px solid var(--border); border-radius:10px; }
+  button { padding:10px 14px; font-weight:600; cursor:pointer; }
+  input[type="range"] { height:36px; padding:0 6px; }
+  .val { min-width:74px; text-align:right; color:#cfe3ff; font-variant-numeric:tabular-nums; }
+  .hint { color:var(--muted); font-size:12px; margin-top:8px; }
+  .timer {
+    font-size:28px; font-variant-numeric:tabular-nums; letter-spacing:0.02em;
+    padding:6px 10px; border:1px solid var(--border); border-radius:10px; min-width:140px; text-align:center;
+    background:#111824;
+  }
 </style>
+</head>
+<body>
+<main>
+  <h1>Background Tone</h1>
 
-<h1>Neural Entrainment - 40 Hz @ 48 kHz loop</h1>
-<h3>Pure 40 Hz sine loop at 48 kHz, sample-accurate, no carrier, no compressor</h3>
+  <div class="row">
+    <button id="playBtn">Play (Loop)</button>
+    <button id="stopBtn">Stop</button>
 
-<div class="row">
-  <span class="tag">Sample rate: <strong>48,000 Hz</strong></span>
-  <span class="tag">Frequency: <strong>40 Hz</strong></span>
-  <span class="tag">Duration (buffer): <strong>1.000 s</strong></span>
-</div>
+    <div class="timer" id="timer" aria-live="polite">00:00:00</div>
+    <button id="resetTimerBtn" title="Reset timer to 00:00:00">Reset Timer</button>
+  </div>
 
-<div class="row">
-  <!-- Output gain for the 40 Hz tone. Clamped ≤ 1.0 to prevent clipping. -->
-  <label>Amplitude (40 Hz, output gain)
-    <input id="amp40" type="number" value="0.8" min="0" max="1.0" step="0.01" />
-  </label>
-</div>
+  <div class="row">
+    <label for="freq">Freq</label>
+    <input id="freq" type="range" min="1" max="100" step="0.1" value="40" />
+    <div class="val" id="freqVal">40.0 Hz</div>
 
-<div class="row">
-  <button id="play">Play (loop)</button>
-  <button id="stop">Stop</button>
-  <small>Tip: for more loudness, keep gain ≤ 1.0 here and raise your system volume.</small>
-</div>
+    <label for="gain">Volume</label>
+    <input id="gain" type="range" min="0" max="1" step="0.01" value="0.15" />
+    <div class="val" id="gainVal">0.15</div>
+  </div>
+
+  <div class="hint">
+    Tip: Tap <b>Play (Loop)</b> once. Audio should continue while you switch tabs/apps or lock the screen.  
+    Works offline after your first visit (HTTPS or localhost).
+  </div>
+</main>
 
 <script>
-/*
-  Buffer length is hard-coded to 1.000 s.
-  IMPORTANT: To avoid clicks at the loop boundary, the buffer duration must be
-  an integer multiple of the cycle length (1/40 s = 0.025 s), e.g. 1 s, 2.5 s, 10 s, etc.
+/* ---------------------------------------------
+   1) Single-file Service Worker + Manifest setup
+   --------------------------------------------- */
+(async () => {
+  if (!('serviceWorker' in navigator)) return;
 
-  DESIGN:
-  - 40 Hz tone is synthesized at amplitude = 1.0 (full-scale, clean).
-  - "Amplitude (40 Hz)" is POST-GAIN via GainNode, clamped ≤ 1.0.
-*/
+  // Create a simple web app manifest in-memory (Blob URL)
+  const manifest = {
+    name: "Background Tone",
+    short_name: "Tone",
+    start_url: location.pathname + location.search,
+    display: "standalone",
+    background_color: "#0b0f14",
+    theme_color: "#0b0f14",
+    icons: []
+  };
+  const manifestBlob = new Blob([JSON.stringify(manifest)], { type: "application/manifest+json" });
+  const manifestURL = URL.createObjectURL(manifestBlob);
+  const link = document.createElement('link');
+  link.rel = 'manifest';
+  link.href = manifestURL;
+  document.head.appendChild(link);
 
-const FIXED_SAMPLE_RATE = 48000;  // 48 kHz (requested)
-const FIXED_DURATION_S  = 1.0;    // 1.000 s
-const FREQ_MAIN_HZ      = 40;     // 40 Hz entrainment target
+  // Create a Service Worker in-memory (Blob URL)
+  const CACHE = "tone-v1";
+  const swCode = `
+    const CACHE = "${CACHE}";
+    self.addEventListener("install", (e) => { self.skipWaiting(); });
+    self.addEventListener("activate", (e) => {
+      e.waitUntil((async () => {
+        const keys = await caches.keys();
+        await Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)));
+        await self.clients.claim();
+      })());
+    });
+    self.addEventListener("fetch", (e) => {
+      const req = e.request;
+      if (req.method !== "GET") return;
+      e.respondWith((async () => {
+        const cache = await caches.open(CACHE);
+        const cached = await cache.match(req);
+        if (cached) return cached;
+        try {
+          const resp = await fetch(req);
+          if (resp.ok && (req.mode === "navigate" || req.headers.get("accept")?.includes("text/html") || req.destination === "document" || req.destination === "script" || req.destination === "style")) {
+            cache.put(req, resp.clone());
+          }
+          return resp;
+        } catch (err) {
+          const fallback = await cache.match(self.registration.scope);
+          if (fallback) return fallback;
+          return new Response("<h1>Offline</h1><p>This app is available offline after your first visit.</p>", { headers: { "Content-Type": "text/html" }});
+        }
+      })());
+    });
+  `;
+  const swBlob = new Blob([swCode], { type: "text/javascript" });
+  const swURL = URL.createObjectURL(swBlob);
 
-let ctx = null;
-let src40 = null, gain40 = null;
-
-// UI
-const $play = document.getElementById('play');
-const $stop = document.getElementById('stop');
-const $amp40 = document.getElementById('amp40');
-
-/** Ensure an AudioContext exists, requesting 48 kHz (browser may override) */
-async function ensureCtx() {
-  if (!ctx) {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    ctx = new AC({ sampleRate: FIXED_SAMPLE_RATE });
-    gain40 = ctx.createGain();
-    gain40.connect(ctx.destination);
+  try {
+    await navigator.serviceWorker.register(swURL, { scope: "./" });
+  } catch (e) {
+    console.warn("ServiceWorker registration failed:", e);
   }
-  if (ctx.state === 'suspended') await ctx.resume();
-  return ctx;
-}
+})();
 
-/** Generate a pure 40 Hz sine at amplitude EXACTLY 1.0 */
-function makeBuffer40Hz() {
-  const rate = ctx.sampleRate;
-  const n = Math.floor(FIXED_DURATION_S * rate);
-  const data = new Float32Array(n);
-  const w = 2 * Math.PI * FREQ_MAIN_HZ;
-  for (let i = 0; i < n; i++) {
-    data[i] = Math.sin(w * (i / rate)) * 1.0;
+/* ---------------------------------------------
+   2) Audio: Web Audio -> MediaStream -> <audio>
+   --------------------------------------------- */
+(() => {
+  let ctx, osc, gainNode, mediaDest, audioEl;
+  let running = false;
+
+  const state = { freq: 40.0, gain: 0.15 };
+
+  const playBtn = document.getElementById('playBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const freqSlider = document.getElementById('freq');
+  const gainSlider = document.getElementById('gain');
+  const freqVal = document.getElementById('freqVal');
+  const gainVal = document.getElementById('gainVal');
+
+  function setupAudio() {
+    if (ctx) return;
+
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+
+    // Graph: Oscillator -> Gain -> (device output + MediaStream)
+    gainNode = ctx.createGain();
+    gainNode.gain.value = state.gain;
+
+    // 1) Normal output
+    gainNode.connect(ctx.destination);
+
+    // 2) MediaStream for hidden <audio> (enables background playback on iOS)
+    mediaDest = ctx.createMediaStreamDestination();
+    gainNode.connect(mediaDest);
+
+    // Oscillator (created but started later)
+    osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = state.freq;
+    osc.connect(gainNode);
+
+    // Hidden <audio> that plays our MediaStream
+    audioEl = new Audio();
+    audioEl.playsInline = true; // iOS hint
+    audioEl.srcObject = mediaDest.stream;
+
+    // Media Session (lock screen info & basic controls)
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: `Tone ${state.freq.toFixed(1)} Hz`,
+        artist: 'Background Tone',
+        album: 'Session'
+      });
+      navigator.mediaSession.setActionHandler('play', async () => {
+        try { await audioEl.play(); } catch {}
+        if (ctx.state === 'suspended') { try { await ctx.resume(); } catch {} }
+      });
+      navigator.mediaSession.setActionHandler('pause', () => { audioEl.pause(); });
+    }
   }
-  const buf = ctx.createBuffer(1, n, rate);
-  buf.getChannelData(0).set(data);
-  return buf;
-}
 
-/** Start gapless looping; prevent multiple Play clicks until stopped */
-async function playLoop() {
-  if (src40) return; // already playing
-  await ensureCtx();
-
-  const buf40 = makeBuffer40Hz();
-  src40 = ctx.createBufferSource();
-  src40.buffer = buf40;
-  src40.loop = true;
-  src40.loopStart = 0;
-  src40.loopEnd = buf40.duration;
-  src40.connect(gain40);
-  updateGain();
-  src40.start();
-
-  src40.onended = () => { src40 = null; $play.disabled = false; };
-  $play.disabled = true;
-}
-
-/** Stop and re-enable Play */
-function stopAll() {
-  if (src40) { try { src40.stop(); } catch(_){} try { src40.disconnect(); } catch(_){} src40 = null; }
-  $play.disabled = false;
-}
-
-/** Update gain value (clamped 0..1) */
-function updateGain() {
-  if (gain40) {
-    let g = parseFloat($amp40.value);
-    if (!isFinite(g)) g = 0;
-    gain40.gain.value = Math.max(0, Math.min(1, g));
+  async function startAudio() {
+    setupAudio();
+    if (ctx.state === 'suspended') await ctx.resume();
+    try { await audioEl.play(); } catch (e) { alert('Tap Play to allow audio playback.'); throw e; }
+    try { osc.start(); } catch {}
+    running = true;
   }
-}
 
-$play.onclick = async () => {
-  await ensureCtx();
-  if (ctx.state === 'suspended') await ctx.resume();
-  playLoop();
-};
-$stop.onclick = stopAll;
+  async function stopAudio() {
+    if (!ctx) return;
+    audioEl.pause();
+    try { osc.stop(); } catch {}
+    // Recreate oscillator for next play
+    osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = state.freq;
+    osc.connect(gainNode);
+    running = false;
+  }
 
-// Live gain updates while playing
-$amp40.addEventListener('input', updateGain);
+  // UI handlers
+  playBtn.addEventListener('click', async () => {
+    if (!running) {
+      await startAudio();
+      startTimer();
+    }
+  });
+
+  stopBtn.addEventListener('click', async () => {
+    if (running) {
+      await stopAudio();
+      stopTimer();
+    }
+  });
+
+  freqSlider.addEventListener('input', () => {
+    state.freq = +freqSlider.value;
+    freqVal.textContent = `${state.freq.toFixed(1)} Hz`;
+    if (osc && ctx) osc.frequency.setTargetAtTime(state.freq, ctx.currentTime, 0.01);
+    if ('mediaSession' in navigator && navigator.mediaSession.metadata) {
+      navigator.mediaSession.metadata.title = `Tone ${state.freq.toFixed(1)} Hz`;
+    }
+  });
+
+  gainSlider.addEventListener('input', () => {
+    state.gain = +gainSlider.value;
+    gainVal.textContent = state.gain.toFixed(2);
+    if (gainNode && ctx) gainNode.gain.setTargetAtTime(state.gain, ctx.currentTime, 0.02);
+  });
+
+  // Resume context when tab visible again (helps iOS after interruptions)
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible' && ctx && ctx.state === 'suspended') {
+      try { await ctx.resume(); } catch {}
+    }
+  });
+
+  /* -------------------------
+     3) Timer: HH:MM:SS display
+     ------------------------- */
+  const timerEl = document.getElementById('timer');
+  const resetBtn = document.getElementById('resetTimerBtn');
+
+  let timerInterval = null;
+  let elapsedSeconds = 0;
+
+  function formatHMS(totalSeconds) {
+    const s = Math.max(0, Math.floor(totalSeconds));
+    const hrs = Math.floor(s / 3600);
+    const mins = Math.floor((s % 3600) / 60);
+    const secs = s % 60;
+    const pad = (n) => n.toString().padStart(2, '0');
+    return `${pad(hrs)}:${pad(mins)}:${pad(secs)}`;
+  }
+
+  function renderTimer() {
+    timerEl.textContent = formatHMS(elapsedSeconds);
+  }
+
+  function startTimer() {
+    if (timerInterval) return; // avoid duplicates
+    // Tick every 1000 ms
+    timerInterval = setInterval(() => {
+      elapsedSeconds += 1;
+      renderTimer();
+    }, 1000);
+  }
+
+  function stopTimer() {
+    if (timerInterval) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+    }
+  }
+
+  function resetTimer() {
+    elapsedSeconds = 0;
+    renderTimer();
+  }
+
+  resetBtn.addEventListener('click', () => {
+    resetTimer();
+  });
+
+  // Initialize display
+  renderTimer();
+
+})();
 </script>
+</body>
 </html>
