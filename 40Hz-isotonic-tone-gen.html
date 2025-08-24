@@ -70,7 +70,7 @@
   link.href = manifestURL;
   document.head.appendChild(link);
 
-  const CACHE = "tone-v1";
+  const CACHE = "tone-v2";
   const swCode = `
     const CACHE = "${CACHE}";
     self.addEventListener("install", (e) => { self.skipWaiting(); });
@@ -107,81 +107,105 @@
   try { await navigator.serviceWorker.register(swURL, { scope: "./" }); } catch {}
 })();
 
-/* --- Audio setup (fixed 40 Hz) --- */
+/* --- Generate a seamless 40 Hz WAV and play it via <audio> (loop) --- */
 (() => {
-  let ctx, osc, gainNode, mediaDest, audioEl;
-  let running = false;
+  // Parameters
+  const SAMPLE_RATE = 48000;      // Prefer 48 kHz on iOS
+  const FREQ = 40;                // 40 Hz fixed
+  const DURATION_SEC = 25;        // 25s = 1000 cycles at 40 Hz → seamless
+  const AMPLITUDE = 0.6;
 
-  const state = { freq: 40.0, gain: 0.15 };
+  // Generate PCM (Int16 mono) with whole-cycle alignment
+  const totalSamples = SAMPLE_RATE * DURATION_SEC;
+  const pcm = new Int16Array(totalSamples);
+  for (let i = 0; i < totalSamples; i++) {
+    const t = i / SAMPLE_RATE;
+    const s = Math.sin(2 * Math.PI * FREQ * t);
+    pcm[i] = Math.max(-1, Math.min(1, s * AMPLITUDE)) * 0x7FFF;
+  }
+  // Build WAV container
+  function pcmToWavBytes(pcm16, sampleRate) {
+    const numChannels = 1;
+    const bytesPerSample = 2;
+    const blockAlign = numChannels * bytesPerSample;
+    const byteRate = sampleRate * blockAlign;
+    const dataSize = pcm16.length * bytesPerSample;
+    const buffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buffer);
 
+    writeStr(view, 0, "RIFF");
+    view.setUint32(4, 36 + dataSize, true);
+    writeStr(view, 8, "WAVE");
+    writeStr(view, 12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, 16, true);
+    writeStr(view, 36, "data");
+    view.setUint32(40, dataSize, true);
+    let offset = 44;
+    for (let i = 0; i < pcm16.length; i++, offset += 2) {
+      view.setInt16(offset, pcm16[i], true);
+    }
+    return new Uint8Array(buffer);
+  }
+  function writeStr(view, offset, str) {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  }
+
+  const wavBytes = pcmToWavBytes(pcm, SAMPLE_RATE);
+  const blob = new Blob([wavBytes], { type: "audio/wav" });
+  const url = URL.createObjectURL(blob);
+
+  // Media element playback
+  const audioEl = new Audio();
+  audioEl.src = url;
+  audioEl.loop = true;
+  audioEl.preload = "auto";
+  audioEl.playsInline = true;
+
+  // UI wiring
   const playBtn = document.getElementById('playBtn');
   const stopBtn = document.getElementById('stopBtn');
   const gainSlider = document.getElementById('gain');
   const gainVal = document.getElementById('gainVal');
 
-  function setupAudio() {
-    if (ctx) return;
-    ctx = new (window.AudioContext || window.webkitAudioContext)();
-    gainNode = ctx.createGain();
-    gainNode.gain.value = state.gain;
-    gainNode.connect(ctx.destination);
-    mediaDest = ctx.createMediaStreamDestination();
-    gainNode.connect(mediaDest);
-    osc = ctx.createOscillator();
-    osc.type = 'sine';
-    osc.frequency.value = state.freq; // always 40 Hz
-    osc.connect(gainNode);
-    audioEl = new Audio();
-    audioEl.playsInline = true;
-    audioEl.srcObject = mediaDest.stream;
-    if ('mediaSession' in navigator) {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: `Neural Entrainment - 40 Hz loop`,
-        artist: 'Background Tone',
-        album: 'Session'
-      });
-      navigator.mediaSession.setActionHandler('play', async () => { try { await audioEl.play(); } catch {} if (ctx.state === 'suspended') await ctx.resume(); });
-      navigator.mediaSession.setActionHandler('pause', () => { audioEl.pause(); });
-    }
-  }
+  let running = false;
 
   async function startAudio() {
-    setupAudio();
-    if (ctx.state === 'suspended') await ctx.resume();
-    try { await audioEl.play(); } catch {}
-    try { osc.start(); } catch {}
+    try { await audioEl.play(); } catch (e) {}
     running = true;
   }
-
-  async function stopAudio() {
-    if (!ctx) return;
+  function stopAudio() {
     audioEl.pause();
-    try { osc.stop(); } catch {}
-    osc = ctx.createOscillator();
-    osc.type = 'sine';
-    osc.frequency.value = state.freq;
-    osc.connect(gainNode);
     running = false;
   }
 
   playBtn.addEventListener('click', async () => {
     if (!running) { await startAudio(); startTimer(); }
   });
-  stopBtn.addEventListener('click', async () => {
-    if (running) { await stopAudio(); stopTimer(); }
+  stopBtn.addEventListener('click', () => {
+    if (running) { stopAudio(); stopTimer(); }
   });
 
   gainSlider.addEventListener('input', () => {
-    state.gain = +gainSlider.value;
-    gainVal.textContent = state.gain.toFixed(2);
-    if (gainNode && ctx) gainNode.gain.setTargetAtTime(state.gain, ctx.currentTime, 0.02);
+    const v = +gainSlider.value;
+    gainVal.textContent = v.toFixed(2);
+    audioEl.volume = v;
   });
 
-  document.addEventListener('visibilitychange', async () => {
-    if (document.visibilityState === 'visible' && ctx && ctx.state === 'suspended') {
-      try { await ctx.resume(); } catch {}
-    }
-  });
+  if ('mediaSession' in navigator) {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: 'Neural Entrainment - 40 Hz loop',
+      artist: 'Background Tone',
+      album: 'Session'
+    });
+    navigator.mediaSession.setActionHandler('play', async () => { try { await audioEl.play(); } catch {} });
+    navigator.mediaSession.setActionHandler('pause', () => { audioEl.pause(); });
+  }
 
   /* --- Timer --- */
   const timerEl = document.getElementById('timer');
