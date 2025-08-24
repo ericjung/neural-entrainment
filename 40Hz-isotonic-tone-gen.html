@@ -70,7 +70,7 @@
   link.href = manifestURL;
   document.head.appendChild(link);
 
-  const CACHE = "tone-v2";
+  const CACHE = "tone-v3";
   const swCode = `
     const CACHE = "${CACHE}";
     self.addEventListener("install", (e) => { self.skipWaiting(); });
@@ -107,83 +107,97 @@
   try { await navigator.serviceWorker.register(swURL, { scope: "./" }); } catch {}
 })();
 
-/* --- Generate a seamless 40 Hz WAV and play it via <audio> (loop) --- */
+/* --- Gapless 40 Hz via Web Audio buffer loop, anchored to <audio> for background --- */
 (() => {
-  // Parameters
-  const SAMPLE_RATE = 48000;      // Prefer 48 kHz on iOS
-  const FREQ = 40;                // 40 Hz fixed
-  const DURATION_SEC = 25;        // 25s = 1000 cycles at 40 Hz → seamless
-  const AMPLITUDE = 0.6;
-
-  // Generate PCM (Int16 mono) with whole-cycle alignment
-  const totalSamples = SAMPLE_RATE * DURATION_SEC;
-  const pcm = new Int16Array(totalSamples);
-  for (let i = 0; i < totalSamples; i++) {
-    const t = i / SAMPLE_RATE;
-    const s = Math.sin(2 * Math.PI * FREQ * t);
-    pcm[i] = Math.max(-1, Math.min(1, s * AMPLITUDE)) * 0x7FFF;
-  }
-  // Build WAV container
-  function pcmToWavBytes(pcm16, sampleRate) {
-    const numChannels = 1;
-    const bytesPerSample = 2;
-    const blockAlign = numChannels * bytesPerSample;
-    const byteRate = sampleRate * blockAlign;
-    const dataSize = pcm16.length * bytesPerSample;
-    const buffer = new ArrayBuffer(44 + dataSize);
-    const view = new DataView(buffer);
-
-    writeStr(view, 0, "RIFF");
-    view.setUint32(4, 36 + dataSize, true);
-    writeStr(view, 8, "WAVE");
-    writeStr(view, 12, "fmt ");
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, numChannels, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, byteRate, true);
-    view.setUint16(32, blockAlign, true);
-    view.setUint16(34, 16, true);
-    writeStr(view, 36, "data");
-    view.setUint32(40, dataSize, true);
-    let offset = 44;
-    for (let i = 0; i < pcm16.length; i++, offset += 2) {
-      view.setInt16(offset, pcm16[i], true);
-    }
-    return new Uint8Array(buffer);
-  }
-  function writeStr(view, offset, str) {
-    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
-  }
-
-  const wavBytes = pcmToWavBytes(pcm, SAMPLE_RATE);
-  const blob = new Blob([wavBytes], { type: "audio/wav" });
-  const url = URL.createObjectURL(blob);
-
-  // Media element playback
-  const audioEl = new Audio();
-  audioEl.src = url;
-  audioEl.loop = true;
-  audioEl.preload = "auto";
-  audioEl.playsInline = true;
-
-  // UI wiring
-  const playBtn = document.getElementById('playBtn');
-  const stopBtn = document.getElementById('stopBtn');
-  const gainSlider = document.getElementById('gain');
-  const gainVal = document.getElementById('gainVal');
-
+  let ctx, gainNode, mediaDest, audioEl, source;
   let running = false;
 
+  const FREQ = 40;              // fixed 40 Hz
+  const AMPLITUDE = 0.6;        // headroom
+  const LOOP_SECONDS = 1;       // 1s = exactly 40 cycles → perfect loop
+  // (You can set this to 2, 5, etc.; any integer seconds also works gaplessly.)
+
+  const playBtn   = document.getElementById('playBtn');
+  const stopBtn   = document.getElementById('stopBtn');
+  const gainSlider= document.getElementById('gain');
+  const gainVal   = document.getElementById('gainVal');
+
+  function setupAudio() {
+    if (ctx) return;
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+
+    // Gain
+    gainNode = ctx.createGain();
+    gainNode.gain.value = +gainSlider.value;
+
+    // Route to device
+    gainNode.connect(ctx.destination);
+
+    // ALSO route to MediaStream -> <audio> so iOS keeps audio alive in background
+    mediaDest = ctx.createMediaStreamDestination();
+    gainNode.connect(mediaDest);
+
+    audioEl = new Audio();
+    audioEl.srcObject = mediaDest.stream;
+    audioEl.playsInline = true;
+
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: 'Neural Entrainment - 40 Hz loop',
+        artist: 'Background Tone',
+        album: 'Session'
+      });
+      navigator.mediaSession.setActionHandler('play', async () => {
+        try { await audioEl.play(); } catch {}
+        if (ctx.state === 'suspended') { try { await ctx.resume(); } catch {} }
+      });
+      navigator.mediaSession.setActionHandler('pause', () => { audioEl.pause(); });
+    }
+  }
+
+  function createLoopBuffer() {
+    // Match the context's sample rate to avoid resampling gaps
+    const sr = ctx.sampleRate;
+    const length = Math.round(sr * LOOP_SECONDS); // integer samples
+    const buffer = ctx.createBuffer(1, length, sr);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < length; i++) {
+      const t = i / sr;
+      data[i] = Math.sin(2 * Math.PI * FREQ * t) * AMPLITUDE;
+    }
+    // Ensure the loop endpoints meet at the same phase (already true since 1s*40 cycles)
+    return buffer;
+  }
+
+  function startSource() {
+    const buf = createLoopBuffer();
+    source = ctx.createBufferSource();
+    source.buffer = buf;
+    source.loop = true;
+    source.loopStart = 0;
+    source.loopEnd = buf.duration;
+    source.connect(gainNode);
+    source.start();
+  }
+
   async function startAudio() {
-    try { await audioEl.play(); } catch (e) {}
+    setupAudio();
+    if (ctx.state === 'suspended') await ctx.resume();
+    try { await audioEl.play(); } catch {}
+    startSource();
     running = true;
   }
+
   function stopAudio() {
+    if (!ctx || !source) return;
+    try { source.stop(); } catch {}
+    source.disconnect();
+    source = null;
     audioEl.pause();
     running = false;
   }
 
+  // UI
   playBtn.addEventListener('click', async () => {
     if (!running) { await startAudio(); startTimer(); }
   });
@@ -194,18 +208,261 @@
   gainSlider.addEventListener('input', () => {
     const v = +gainSlider.value;
     gainVal.textContent = v.toFixed(2);
-    audioEl.volume = v;
+    if (gainNode && ctx) gainNode.gain.setTargetAtTime(v, ctx.currentTime, 0.02);
   });
 
-  if ('mediaSession' in navigator) {
-    navigator.mediaSession.metadata = new MediaMetadata({
-      title: 'Neural Entrainment - 40 Hz loop',
-      artist: 'Background Tone',
-      album: 'Session'
-    });
-    navigator.mediaSession.setActionHandler('play', async () => { try { await audioEl.play(); } catch {} });
-    navigator.mediaSession.setActionHandler('pause', () => { audioEl.pause(); });
+  // Resume context when visible (helps after interruptions)
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible' && ctx && ctx.state === 'suspended') {
+      try { await ctx.resume(); } catch {}
+    }
+  });
+
+  /* --- Timer --- */
+  const timerEl = document.getElementById('timer');
+  const resetBtn = document.getElementById('resetTimerBtn');
+  let timerInterval = null;
+  let elapsedSeconds = 0;
+
+  function formatHMS(s) {
+    const hrs = Math.floor(s / 3600);
+    const mins = Math.floor((s % 3600) / 60);
+    const secs = s % 60;
+    const pad = (n) => n.toString().padStart(2, '0');
+    return `${pad(hrs)}:${pad(mins)}:${pad(secs)}`;
   }
+  function renderTimer() { timerEl.textContent = formatHMS(elapsedSeconds); }
+  function startTimer() {
+    if (timerInterval) return;
+    timerInterval = setInterval(() => { elapsedSeconds += 1; renderTimer(); }, 1000);
+  }
+  function stopTimer() { clearInterval(timerInterval); timerInterval = null; }
+  function resetTimer() { elapsedSeconds = 0; renderTimer(); }
+  resetBtn.addEventListener('click', resetTimer);
+  renderTimer();
+})();
+</script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Neural Entrainment - 40 Hz loop</title>
+<meta name="theme-color" content="#0b0f14" />
+<style>
+  :root { --bg:#0b0f14; --panel:#0f141b; --fg:#e6f1ff; --muted:#93a4bb; --border:#1e2a36; }
+  html,body { height:100%; }
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; background:var(--bg); color:var(--fg); display:grid; place-items:center; }
+  main { width:min(760px,94vw); padding:22px; background:var(--panel); border:1px solid var(--border); border-radius:14px; box-shadow:0 6px 30px rgba(0,0,0,.35); }
+  h1 { margin:0 0 12px; font-size:20px; }
+  .row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:10px 0; }
+  label { color:var(--muted); font-size:14px; }
+  button, input[type="range"] { background:#131a22; color:var(--fg); border:1px solid var(--border); border-radius:10px; }
+  button { padding:10px 14px; font-weight:600; cursor:pointer; }
+  input[type="range"] { height:36px; padding:0 6px; }
+  .val { min-width:74px; text-align:right; color:#cfe3ff; font-variant-numeric:tabular-nums; }
+  .hint { color:var(--muted); font-size:12px; margin-top:8px; line-height:1.4; }
+  .timer {
+    font-size:28px; font-variant-numeric:tabular-nums; letter-spacing:0.02em;
+    padding:6px 10px; border:1px solid var(--border); border-radius:10px; min-width:140px; text-align:center;
+    background:#111824;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Neural Entrainment - 40 Hz loop</h1>
+
+  <div class="row">
+    <button id="playBtn">Play (Loop)</button>
+    <button id="stopBtn">Stop</button>
+
+    <div class="timer" id="timer" aria-live="polite">00:00:00</div>
+    <button id="resetTimerBtn" title="Reset timer to 00:00:00">Reset Timer</button>
+  </div>
+
+  <div class="row">
+    <label for="gain">Volume</label>
+    <input id="gain" type="range" min="0" max="1" step="0.01" value="0.15" />
+    <div class="val" id="gainVal">0.15</div>
+  </div>
+
+  <div class="hint">
+    Tap <b>Play (Loop)</b> once. Audio should continue while you switch tabs/apps or lock the screen.<br>
+    Works offline after your first visit. Can also be added to the iPhone home screen.  
+    Use Safari's Share → Add to Home Screen (must be Safari I think, not another web browser)
+  </div>
+</main>
+
+<script>
+/* --- Service Worker + Manifest (inline) --- */
+(async () => {
+  if (!('serviceWorker' in navigator)) return;
+  const manifest = {
+    name: "Neural Entrainment - 40 Hz loop",
+    short_name: "40Hz Loop",
+    start_url: location.pathname + location.search,
+    display: "standalone",
+    background_color: "#0b0f14",
+    theme_color: "#0b0f14",
+    icons: []
+  };
+  const manifestBlob = new Blob([JSON.stringify(manifest)], { type: "application/manifest+json" });
+  const manifestURL = URL.createObjectURL(manifestBlob);
+  const link = document.createElement('link');
+  link.rel = 'manifest';
+  link.href = manifestURL;
+  document.head.appendChild(link);
+
+  const CACHE = "tone-v3";
+  const swCode = `
+    const CACHE = "${CACHE}";
+    self.addEventListener("install", (e) => { self.skipWaiting(); });
+    self.addEventListener("activate", (e) => {
+      e.waitUntil((async () => {
+        const keys = await caches.keys();
+        await Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)));
+        await self.clients.claim();
+      })());
+    });
+    self.addEventListener("fetch", (e) => {
+      const req = e.request;
+      if (req.method !== "GET") return;
+      e.respondWith((async () => {
+        const cache = await caches.open(CACHE);
+        const cached = await cache.match(req);
+        if (cached) return cached;
+        try {
+          const resp = await fetch(req);
+          if (resp.ok && (req.mode === "navigate" || req.headers.get("accept")?.includes("text/html") || req.destination === "document")) {
+            cache.put(req, resp.clone());
+          }
+          return resp;
+        } catch {
+          const fallback = await cache.match(self.registration.scope);
+          if (fallback) return fallback;
+          return new Response("<h1>Offline</h1><p>This app is cached for offline use after your first visit.</p>", { headers: { "Content-Type": "text/html" }});
+        }
+      })());
+    });
+  `;
+  const swBlob = new Blob([swCode], { type: "text/javascript" });
+  const swURL = URL.createObjectURL(swBlob);
+  try { await navigator.serviceWorker.register(swURL, { scope: "./" }); } catch {}
+})();
+
+/* --- Gapless 40 Hz via Web Audio buffer loop, anchored to <audio> for background --- */
+(() => {
+  let ctx, gainNode, mediaDest, audioEl, source;
+  let running = false;
+
+  const FREQ = 40;              // fixed 40 Hz
+  const AMPLITUDE = 0.6;        // headroom
+  const LOOP_SECONDS = 1;       // 1s = exactly 40 cycles → perfect loop
+  // (You can set this to 2, 5, etc.; any integer seconds also works gaplessly.)
+
+  const playBtn   = document.getElementById('playBtn');
+  const stopBtn   = document.getElementById('stopBtn');
+  const gainSlider= document.getElementById('gain');
+  const gainVal   = document.getElementById('gainVal');
+
+  function setupAudio() {
+    if (ctx) return;
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+
+    // Gain
+    gainNode = ctx.createGain();
+    gainNode.gain.value = +gainSlider.value;
+
+    // Route to device
+    gainNode.connect(ctx.destination);
+
+    // ALSO route to MediaStream -> <audio> so iOS keeps audio alive in background
+    mediaDest = ctx.createMediaStreamDestination();
+    gainNode.connect(mediaDest);
+
+    audioEl = new Audio();
+    audioEl.srcObject = mediaDest.stream;
+    audioEl.playsInline = true;
+
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: 'Neural Entrainment - 40 Hz loop',
+        artist: 'Background Tone',
+        album: 'Session'
+      });
+      navigator.mediaSession.setActionHandler('play', async () => {
+        try { await audioEl.play(); } catch {}
+        if (ctx.state === 'suspended') { try { await ctx.resume(); } catch {} }
+      });
+      navigator.mediaSession.setActionHandler('pause', () => { audioEl.pause(); });
+    }
+  }
+
+  function createLoopBuffer() {
+    // Match the context's sample rate to avoid resampling gaps
+    const sr = ctx.sampleRate;
+    const length = Math.round(sr * LOOP_SECONDS); // integer samples
+    const buffer = ctx.createBuffer(1, length, sr);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < length; i++) {
+      const t = i / sr;
+      data[i] = Math.sin(2 * Math.PI * FREQ * t) * AMPLITUDE;
+    }
+    // Ensure the loop endpoints meet at the same phase (already true since 1s*40 cycles)
+    return buffer;
+  }
+
+  function startSource() {
+    const buf = createLoopBuffer();
+    source = ctx.createBufferSource();
+    source.buffer = buf;
+    source.loop = true;
+    source.loopStart = 0;
+    source.loopEnd = buf.duration;
+    source.connect(gainNode);
+    source.start();
+  }
+
+  async function startAudio() {
+    setupAudio();
+    if (ctx.state === 'suspended') await ctx.resume();
+    try { await audioEl.play(); } catch {}
+    startSource();
+    running = true;
+  }
+
+  function stopAudio() {
+    if (!ctx || !source) return;
+    try { source.stop(); } catch {}
+    source.disconnect();
+    source = null;
+    audioEl.pause();
+    running = false;
+  }
+
+  // UI
+  playBtn.addEventListener('click', async () => {
+    if (!running) { await startAudio(); startTimer(); }
+  });
+  stopBtn.addEventListener('click', () => {
+    if (running) { stopAudio(); stopTimer(); }
+  });
+
+  gainSlider.addEventListener('input', () => {
+    const v = +gainSlider.value;
+    gainVal.textContent = v.toFixed(2);
+    if (gainNode && ctx) gainNode.gain.setTargetAtTime(v, ctx.currentTime, 0.02);
+  });
+
+  // Resume context when visible (helps after interruptions)
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible' && ctx && ctx.state === 'suspended') {
+      try { await ctx.resume(); } catch {}
+    }
+  });
 
   /* --- Timer --- */
   const timerEl = document.getElementById('timer');
