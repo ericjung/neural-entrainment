@@ -1,8 +1,10 @@
 # neural-entrainment
 
-2025-08-24: the [web version](https://ericjung.github.io/neural-entrainment/40Hz-isotonic-tone-gen.html) of this works accurately. The other versions are not exactl 40 Hz, so do not use them. Web version uses service workers to stay active if navigating away from browser app on iphone. You can also add it to the homescreen.
+2025-08-24: the [web version](https://ericjung.github.io/neural-entrainment/40Hz-isotonic-tone-gen.html) of this works accurately. The other versions are not exactly 40 Hz, so do not use them.
 
 
+
+---
 A collection of [neural brainwave entrainment](https://en.wikipedia.org/wiki/Brainwave_entrainment) code. I'll be adding to this more over time. After [installing node](https://nodejs.org/en/learn/getting-started/how-to-install-nodejs), clone this directory locally then:
 
 
