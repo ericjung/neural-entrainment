@@ -137,7 +137,7 @@
   }
 })();
 
-/* ------------------ Player logic (file-based; exclusive) ------------------ */
+/* ------------------ Seamless Web Audio API Player ------------------ */
 (() => {
   const playFileBtn = document.getElementById('playFileBtn');
   const playAMBtn   = document.getElementById('playAMBtn');
@@ -146,13 +146,77 @@
   const gainSlider  = document.getElementById('gain');
   const gainVal     = document.getElementById('gainVal');
 
-  const aContinuous = document.getElementById('loopContinuous');
-  const aPulsed     = document.getElementById('loopPulsed');
-
   const statusText  = document.getElementById('statusText');
   const statusDot   = document.getElementById('statusDot');
 
   let running = null; // 'cont' | 'pulsed' | null
+  let audioContext = null;
+  let audioBuffers = {};
+  let currentSources = [];
+  let gainNode = null;
+  let nextScheduleTime = 0;
+
+  // Initialize Web Audio API
+  async function initAudioContext() {
+    if (!audioContext) {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      gainNode = audioContext.createGain();
+      gainNode.connect(audioContext.destination);
+      gainNode.gain.value = +gainSlider.value;
+    }
+    
+    if (audioContext.state === 'suspended') {
+      await audioContext.resume();
+    }
+  }
+
+  // Load and decode audio files
+  async function loadAudioBuffer(url) {
+    if (audioBuffers[url]) return audioBuffers[url];
+    
+    try {
+      const response = await fetch(url);
+      const arrayBuffer = await response.arrayBuffer();
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      audioBuffers[url] = audioBuffer;
+      return audioBuffer;
+    } catch (error) {
+      console.error('Failed to load audio:', url, error);
+      throw error;
+    }
+  }
+
+  // Schedule seamless looping
+  function scheduleLoop(audioBuffer, startTime = null) {
+    if (!running) return;
+
+    const source = audioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(gainNode);
+
+    const now = audioContext.currentTime;
+    const scheduleTime = startTime || Math.max(now, nextScheduleTime);
+    
+    source.start(scheduleTime);
+    source.stop(scheduleTime + audioBuffer.duration);
+    
+    currentSources.push(source);
+    
+    // Schedule next loop to start exactly when this one ends
+    nextScheduleTime = scheduleTime + audioBuffer.duration;
+    
+    // Clean up finished sources
+    source.onended = () => {
+      const index = currentSources.indexOf(source);
+      if (index !== -1) currentSources.splice(index, 1);
+    };
+
+    // Schedule the next iteration
+    if (running) {
+      const nextTimeout = (nextScheduleTime - now - 0.05) * 1000; // 50ms early
+      setTimeout(() => scheduleLoop(audioBuffer), Math.max(0, nextTimeout));
+    }
+  }
 
   function setStatus(mode) {
     statusDot.classList.remove('on','am');
@@ -168,31 +232,52 @@
   }
 
   async function stopAll() {
-    try { aContinuous.pause(); } catch {}
-    try { aPulsed.pause(); } catch {}
     running = null;
+    
+    // Stop all current sources immediately
+    currentSources.forEach(source => {
+      try {
+        source.stop();
+      } catch (e) {}
+    });
+    
+    currentSources = [];
     setStatus(null);
     stopTimer();
   }
 
   async function playContinuous() {
     await stopAll();
-    aContinuous.currentTime = 0;
-    aContinuous.volume = +gainSlider.value;
-    await aContinuous.play();
-    running = 'cont';
-    setStatus('cont');
-    startTimer();
+    await initAudioContext();
+    
+    try {
+      const buffer = await loadAudioBuffer('40hz-continuous-sine.wav');
+      running = 'cont';
+      setStatus('cont');
+      nextScheduleTime = audioContext.currentTime;
+      scheduleLoop(buffer);
+      startTimer();
+    } catch (error) {
+      console.error('Failed to play continuous:', error);
+      setStatus(null);
+    }
   }
 
   async function playPulsed() {
     await stopAll();
-    aPulsed.currentTime = 0;
-    aPulsed.volume = +gainSlider.value;
-    await aPulsed.play();
-    running = 'pulsed';
-    setStatus('pulsed');
-    startTimer();
+    await initAudioContext();
+    
+    try {
+      const buffer = await loadAudioBuffer('10khz-pulsed-40hz.wav');
+      running = 'pulsed';
+      setStatus('pulsed');
+      nextScheduleTime = audioContext.currentTime;
+      scheduleLoop(buffer);
+      startTimer();
+    } catch (error) {
+      console.error('Failed to play pulsed:', error);
+      setStatus(null);
+    }
   }
 
   playFileBtn.addEventListener('click', playContinuous);
@@ -203,15 +288,21 @@
   gainSlider.addEventListener('input', () => {
     const v = +gainSlider.value;
     gainVal.textContent = v.toFixed(2);
-    if (running === 'cont') aContinuous.volume = v;
-    if (running === 'pulsed') aPulsed.volume = v;
+    if (gainNode) {
+      gainNode.gain.value = v;
+    }
   });
 
-  // small iOS resilience: resume after visibility change if paused by the system
+  // Handle page visibility changes
   document.addEventListener('visibilitychange', async () => {
-    if (document.visibilityState === 'visible') {
-      if (running === 'cont' && aContinuous.paused) { try { await aContinuous.play(); } catch {} }
-      if (running === 'pulsed' && aPulsed.paused)   { try { await aPulsed.play(); } catch {} }
+    if (document.visibilityState === 'visible' && audioContext) {
+      try {
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+      } catch (e) {
+        console.warn('Could not resume audio context:', e);
+      }
     }
   });
 
