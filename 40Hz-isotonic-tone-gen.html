@@ -3,8 +3,19 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Neural Entrainment - 40 Hz loop</title>
+<title>Neural Entrainment</title>
 <meta name="theme-color" content="#0b0f14" />
+
+<!-- iOS Add-to-Home-Screen essentials (Apple ignores most of web manifest) -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Neural Entrainment">
+<link rel="apple-touch-icon" href="brain-180.png">
+<link rel="apple-touch-icon" sizes="120x120" href="brain-120.png">
+<link rel="apple-touch-icon" sizes="152x152" href="brain-152.png">
+<link rel="apple-touch-icon" sizes="167x167" href="brain-167.png">
+<link rel="apple-touch-icon" sizes="180x180" href="brain-180.png">
+
 <style>
   :root { --bg:#0b0f14; --panel:#0f141b; --fg:#e6f1ff; --muted:#93a4bb; --border:#1e2a36; --pill:#0f1f2d; --ok:#23c55e; --warn:#60a5fa; }
   html,body { height:100%; }
@@ -30,7 +41,7 @@
 
   <div class="row">
     <button id="playFileBtn">Play Continuous 40Hz Sine (file)</button>
-    <button id="playAMBtn">Play 10kHz pulsed at 40Hz</button>
+    <button id="playAMBtn">Play 10kHz pulsed at 40Hz (file)</button>
     <button id="stopBtn">Stop</button>
     <div class="timer" id="timer" aria-live="polite">00:00:00</div>
     <button id="resetTimerBtn">Reset Timer</button>
@@ -49,38 +60,107 @@
     <div class="val" id="gainVal">0.15</div>
   </div>
 
-  <!-- #1: external audio file, looped -->
-  <audio id="loopAudio" src="40hz-continuous-sine.wav" preload="auto" loop playsinline></audio>
+  <!-- Both options use media elements (iOS background is more reliable with <audio>) -->
+  <audio id="loopContinuous" src="40hz-continuous-sine.wav" preload="auto" loop playsinline></audio>
+  <audio id="loopPulsed"     src="10khz-pulsed-40hz.wav"    preload="auto" loop playsinline></audio>
 </main>
 
 <script>
+/* -------- Inline manifest + Service Worker for offline PWA ---------- */
+(async () => {
+  const manifest = {
+    name: "Neural Entrainment",
+    short_name: "Entrain",
+    start_url: location.pathname + location.search,
+    display: "standalone",
+    background_color: "#0b0f14",
+    theme_color: "#0b0f14",
+    icons: [
+      { "src": "brain-192.png", "sizes": "192x192", "type": "image/png" },
+      { "src": "brain-512.png", "sizes": "512x512", "type": "image/png" },
+      { "src": "brain-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    ]
+  };
+  const manifestBlob = new Blob([JSON.stringify(manifest)], { type: "application/manifest+json" });
+  const manifestURL = URL.createObjectURL(manifestBlob);
+  const link = document.createElement('link');
+  link.rel = 'manifest';
+  link.href = manifestURL;
+  document.head.appendChild(link);
+
+  if ('serviceWorker' in navigator) {
+    const CACHE = 'entrain-v1';
+    const swCode = `
+      const CACHE = '${CACHE}';
+      const ASSETS = [
+        './',
+        location.href,
+        '40hz-continuous-sine.wav',
+        '10khz-pulsed-40hz.wav',
+        'brain-120.png','brain-152.png','brain-167.png','brain-180.png',
+        'brain-192.png','brain-512.png','brain-maskable-512.png'
+      ];
+      self.addEventListener('install', e => {
+        e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(()=>self.skipWaiting()));
+      });
+      self.addEventListener('activate', e => {
+        e.waitUntil((async () => {
+          const keys = await caches.keys();
+          await Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)));
+          await self.clients.claim();
+        })());
+      });
+      self.addEventListener('fetch', e => {
+        const req = e.request;
+        if (req.method !== 'GET') return;
+        e.respondWith((async () => {
+          const cache = await caches.open(CACHE);
+          const hit = await cache.match(req, {ignoreVary:true});
+          if (hit) return hit;
+          try {
+            const net = await fetch(req);
+            if (net.ok) cache.put(req, net.clone());
+            return net;
+          } catch {
+            // offline fallback to index if navigation
+            if (req.mode === 'navigate') {
+              const index = await cache.match('./');
+              if (index) return index;
+            }
+            return new Response('Offline', { status: 503 });
+          }
+        })());
+      });
+    `;
+    const swURL = URL.createObjectURL(new Blob([swCode], { type: 'text/javascript' }));
+    try { await navigator.serviceWorker.register(swURL, { scope: './' }); } catch (e) { console.warn('SW registration failed:', e); }
+  }
+})();
+
+/* ------------------ Player logic (file-based; exclusive) ------------------ */
 (() => {
   const playFileBtn = document.getElementById('playFileBtn');
   const playAMBtn   = document.getElementById('playAMBtn');
   const stopBtn     = document.getElementById('stopBtn');
+
   const gainSlider  = document.getElementById('gain');
   const gainVal     = document.getElementById('gainVal');
-  const fileEl      = document.getElementById('loopAudio');
+
+  const aContinuous = document.getElementById('loopContinuous');
+  const aPulsed     = document.getElementById('loopPulsed');
 
   const statusText  = document.getElementById('statusText');
   const statusDot   = document.getElementById('statusDot');
 
-  let ctx = null;
-  let carrierOsc = null, modOsc = null, modOffset = null, masterGain = null;
-  let runningMode = null; // "file" | "am" | null
-
-  function ensureCtx() {
-    if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
-  }
+  let running = null; // 'cont' | 'pulsed' | null
 
   function setStatus(mode) {
-    // Reset classes
-    statusDot.classList.remove('on', 'am');
-    if (mode === 'file') {
-      statusText.textContent = 'Now playing: 40Hz Sine (file loop)';
+    statusDot.classList.remove('on','am');
+    if (mode === 'cont') {
+      statusText.textContent = 'Now playing: 40 Hz continuous (file)';
       statusDot.classList.add('on');
-    } else if (mode === 'am') {
-      statusText.textContent = 'Now playing: 10kHz tone pulsed @ 40Hz';
+    } else if (mode === 'pulsed') {
+      statusText.textContent = 'Now playing: 10 kHz pulsed @ 40 Hz (file)';
       statusDot.classList.add('am');
     } else {
       statusText.textContent = 'Stopped';
@@ -88,78 +168,51 @@
   }
 
   async function stopAll() {
-    // stop Web Audio (#2)
-    if (carrierOsc) { try { carrierOsc.stop(); } catch {} carrierOsc.disconnect(); carrierOsc = null; }
-    if (modOsc) { try { modOsc.stop(); } catch {} modOsc.disconnect(); modOsc = null; }
-    if (modOffset) { try { modOffset.stop(); } catch {} modOffset.disconnect(); modOffset = null; }
-    if (masterGain) { try { masterGain.disconnect(); } catch {} masterGain = null; }
-
-    // stop file (#1)
-    try { fileEl.pause(); } catch {}
-    runningMode = null;
+    try { aContinuous.pause(); } catch {}
+    try { aPulsed.pause(); } catch {}
+    running = null;
     setStatus(null);
     stopTimer();
   }
 
-  async function playFileLoop() {
-    await stopAll();                    // ensure exclusivity
-    runningMode = "file";
-    fileEl.volume = +gainSlider.value;
-    await fileEl.play();
-    setStatus('file');
+  async function playContinuous() {
+    await stopAll();
+    aContinuous.currentTime = 0;
+    aContinuous.volume = +gainSlider.value;
+    await aContinuous.play();
+    running = 'cont';
+    setStatus('cont');
     startTimer();
   }
 
-  async function playPulsedAM() {
-    await stopAll();                    // ensure exclusivity
-    runningMode = "am";
-    ensureCtx();
-    if (ctx.state === 'suspended') await ctx.resume();
-
-    masterGain = ctx.createGain();
-    masterGain.gain.value = +gainSlider.value;
-
-    // Carrier: 10 kHz sine
-    carrierOsc = ctx.createOscillator();
-    carrierOsc.type = 'sine';
-    carrierOsc.frequency.value = 10000;
-
-    // Modulator: 40 Hz square -> scale [-1,1] -> [0,1]
-    modOsc = ctx.createOscillator();
-    modOsc.type = 'square';
-    modOsc.frequency.value = 40;
-
-    const modGain = ctx.createGain();  // scale to 0.5
-    modGain.gain.value = 0.5;
-    modOffset = ctx.createConstantSource(); // offset 0.5
-    modOffset.offset.value = 0.5;
-
-    const carrierGain = ctx.createGain();
-    carrierGain.gain.value = 0;
-
-    // Wiring: (square*0.5 + 0.5) -> carrierGain.gain
-    modOsc.connect(modGain).connect(carrierGain.gain);
-    modOffset.connect(carrierGain.gain);
-
-    carrierOsc.connect(carrierGain).connect(masterGain).connect(ctx.destination);
-
-    modOffset.start();
-    modOsc.start();
-    carrierOsc.start();
-    setStatus('am');
+  async function playPulsed() {
+    await stopAll();
+    aPulsed.currentTime = 0;
+    aPulsed.volume = +gainSlider.value;
+    await aPulsed.play();
+    running = 'pulsed';
+    setStatus('pulsed');
     startTimer();
   }
 
-  playFileBtn.addEventListener('click', playFileLoop);
-  playAMBtn.addEventListener('click', playPulsedAM);
+  playFileBtn.addEventListener('click', playContinuous);
+  playAMBtn.addEventListener('click', playPulsed);
   stopBtn.addEventListener('click', stopAll);
 
-  // Volume handling
+  // volume
   gainSlider.addEventListener('input', () => {
     const v = +gainSlider.value;
     gainVal.textContent = v.toFixed(2);
-    if (runningMode === "file") fileEl.volume = v;
-    else if (runningMode === "am" && masterGain && ctx) masterGain.gain.setTargetAtTime(v, ctx.currentTime, 0.02);
+    if (running === 'cont') aContinuous.volume = v;
+    if (running === 'pulsed') aPulsed.volume = v;
+  });
+
+  // small iOS resilience: resume after visibility change if paused by the system
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible') {
+      if (running === 'cont' && aContinuous.paused) { try { await aContinuous.play(); } catch {} }
+      if (running === 'pulsed' && aPulsed.paused)   { try { await aPulsed.play(); } catch {} }
+    }
   });
 
   // Timer
@@ -167,11 +220,11 @@
   const resetBtn = document.getElementById('resetTimerBtn');
   let timerInterval = null, elapsedSeconds = 0;
   const pad = n => n.toString().padStart(2,'0');
-  function formatHMS(s){return `${pad(Math.floor(s/3600))}:${pad(Math.floor((s%3600)/60))}:${pad(s%60)}`;}
-  function renderTimer(){timerEl.textContent = formatHMS(elapsedSeconds);}
-  function startTimer(){ if (timerInterval) return; timerInterval = setInterval(()=>{elapsedSeconds++; renderTimer();},1000);}
-  function stopTimer(){ clearInterval(timerInterval); timerInterval=null;}
-  function resetTimer(){ elapsedSeconds=0; renderTimer();}
+  const formatHMS = s => `${pad(Math.floor(s/3600))}:${pad(Math.floor((s%3600)/60))}:${pad(s%60)}`;
+  const renderTimer = () => { timerEl.textContent = formatHMS(elapsedSeconds); };
+  const startTimer = () => { if (!timerInterval) timerInterval = setInterval(()=>{elapsedSeconds++; renderTimer();},1000); };
+  const stopTimer  = () => { clearInterval(timerInterval); timerInterval = null; };
+  const resetTimer = () => { elapsedSeconds = 0; renderTimer(); };
   resetBtn.addEventListener('click', resetTimer);
   renderTimer();
 })();
